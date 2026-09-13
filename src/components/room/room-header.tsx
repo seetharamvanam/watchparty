@@ -7,7 +7,7 @@ import { getAppUrl } from "@/lib/client/config";
 import { useRoom } from "@/lib/client/room-context";
 
 export function RoomHeader() {
-  const { code, room, participants, leave, mock, connection } = useRoom();
+  const { code, room, participants, leave, mock } = useRoom();
   const router = useRouter();
   const [copied, setCopied] = useState(false);
   const seats = room?.participantCount ?? participants.length;
@@ -48,15 +48,6 @@ export function RoomHeader() {
         {mock ? (
           <span className="rounded-full border border-warm/30 px-2 py-0.5 text-[10px] uppercase tracking-wider text-warm">
             Mock
-          </span>
-        ) : null}
-        {connection === "connected" ? (
-          <span
-            className="hidden items-center gap-1.5 rounded-full border border-success/30 px-2 py-0.5 text-[10px] uppercase tracking-wider text-success sm:inline-flex"
-            aria-label="Room is ready"
-          >
-            <span className="h-1.5 w-1.5 rounded-full bg-success" aria-hidden />
-            Ready
           </span>
         ) : null}
       </div>

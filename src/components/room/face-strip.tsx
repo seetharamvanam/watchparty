@@ -1,20 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
-import { PermissionRecovery } from "@/components/room/permission-recovery";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { Button } from "@/components/ui/button";
 import { getApi } from "@/lib/client";
 import { avatarColorFor, initialsFor } from "@/lib/client/avatar";
 import { cn } from "@/lib/client/cn";
 import { isMockApi } from "@/lib/client/config";
 import type { AttachableTrack, AvSession, RemoteFace } from "@/lib/client/av-types";
-import {
-  isPermissionDeniedError,
-  watchMediaPermissionGrant,
-  type MediaDenied,
-  type MediaPermissionKind,
-} from "@/lib/client/media-permissions";
-import { speakingLabel, tileIsSpeaking } from "@/lib/client/speaking";
 import { useMediaDevices } from "@/lib/client/use-media-devices";
 import { useRoom } from "@/lib/client/room-context";
 import type { ParticipantPublic } from "@/lib/types";
@@ -24,14 +16,12 @@ export function FaceStrip() {
   const devices = useMediaDevices();
   const [camOn, setCamOn] = useState(false);
   const [micOn, setMicOn] = useState(false);
-  const [denied, setDenied] = useState<MediaDenied>({});
+  const [denied, setDenied] = useState<{ cam?: boolean; mic?: boolean }>({});
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteFaces, setRemoteFaces] = useState<RemoteFace[]>([]);
-  const [speakerIds, setSpeakerIds] = useState<string[]>([]);
   const [avUnavailable, setAvUnavailable] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [headphonesDismissed, setHeadphonesDismissed] = useState(false);
-  const [retrying, setRetrying] = useState(false);
   const avRef = useRef<AvSession | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
 
@@ -43,7 +33,6 @@ export function FaceStrip() {
     if (!sessionToken || isMockApi()) return;
     let cancelled = false;
     let unsubscribe: (() => void) | undefined;
-    let unsubscribeSpeakers: (() => void) | undefined;
 
     (async () => {
       try {
@@ -61,7 +50,6 @@ export function FaceStrip() {
         }
         avRef.current = session;
         unsubscribe = session.onRemote((faces) => setRemoteFaces(faces));
-        unsubscribeSpeakers = session.onSpeakers((ids) => setSpeakerIds(ids));
       } catch {
         if (!cancelled) setAvUnavailable(true);
       }
@@ -70,7 +58,6 @@ export function FaceStrip() {
     return () => {
       cancelled = true;
       unsubscribe?.();
-      unsubscribeSpeakers?.();
       void avRef.current?.disconnect();
       avRef.current = null;
     };
@@ -81,21 +68,6 @@ export function FaceStrip() {
       localStreamRef.current?.getTracks().forEach((track) => track.stop());
     };
   }, []);
-
-  const clearDenied = useCallback((kind: MediaPermissionKind) => {
-    setDenied((current) => ({ ...current, [kind]: false }));
-  }, []);
-
-  useEffect(() => {
-    const query = navigator.permissions?.query.bind(navigator.permissions) as
-      | ((descriptor: { name: "camera" | "microphone" }) => Promise<{
-          state: string;
-          addEventListener: (type: "change", listener: () => void) => void;
-          removeEventListener: (type: "change", listener: () => void) => void;
-        }>)
-      | undefined;
-    return watchMediaPermissionGrant(query, clearDenied);
-  }, [clearDenied]);
 
   async function toggleCam() {
     if (camOn) {
@@ -124,7 +96,7 @@ export function FaceStrip() {
       await avRef.current?.setCamera(true, devices.cameraId || undefined);
       setCamOn(true);
     } catch (err) {
-      if (isPermissionDeniedError(err)) {
+      if (err instanceof DOMException && (err.name === "NotAllowedError" || err.name === "PermissionDeniedError")) {
         setDenied((d) => ({ ...d, cam: true }));
         setCamOn(false);
         return;
@@ -155,22 +127,12 @@ export function FaceStrip() {
       await avRef.current?.setMicrophone(true, devices.micId || undefined);
       setMicOn(true);
     } catch (err) {
-      if (isPermissionDeniedError(err)) {
+      if (err instanceof DOMException && (err.name === "NotAllowedError" || err.name === "PermissionDeniedError")) {
         setDenied((d) => ({ ...d, mic: true }));
         setMicOn(false);
         return;
       }
       setAvUnavailable(true);
-    }
-  }
-
-  async function retryDenied() {
-    setRetrying(true);
-    try {
-      if (denied.cam) await toggleCam();
-      if (denied.mic) await toggleMic();
-    } finally {
-      setRetrying(false);
     }
   }
 
@@ -196,11 +158,6 @@ export function FaceStrip() {
         {participants.map((person) => {
           const remote = remoteById.get(person.id);
           const isSelf = person.id === me?.id;
-          const speaking = tileIsSpeaking({
-            participantId: person.id,
-            speakerIds,
-            remoteSpeaking: remote?.speaking,
-          });
           return (
             <FaceTile
               key={person.id}
@@ -211,7 +168,7 @@ export function FaceStrip() {
               camForcedOff={isSelf && (!camOn || Boolean(denied.cam))}
               permissionDenied={isSelf && Boolean(denied.cam)}
               localMicOn={isSelf ? micOn : Boolean(remote?.micEnabled)}
-              speaking={speaking}
+              speaking={Boolean(remote?.speaking)}
             />
           );
         })}
@@ -220,22 +177,8 @@ export function FaceStrip() {
         ) : null}
 
         <div className="ml-auto flex shrink-0 items-center gap-2 pl-2">
-          <ToggleChip
-            pressed={camOn}
-            blocked={Boolean(denied.cam)}
-            onClick={() => void toggleCam()}
-            activeLabel="Camera on"
-            inactiveLabel="Camera off"
-            blockedLabel="Camera blocked"
-          />
-          <ToggleChip
-            pressed={micOn}
-            blocked={Boolean(denied.mic)}
-            onClick={() => void toggleMic()}
-            activeLabel="Mic on"
-            inactiveLabel="Mic off"
-            blockedLabel="Mic blocked"
-          />
+          <ToggleChip pressed={camOn} onClick={() => void toggleCam()} activeLabel="Camera on" inactiveLabel="Camera off" />
+          <ToggleChip pressed={micOn} onClick={() => void toggleMic()} activeLabel="Mic on" inactiveLabel="Mic off" />
           <Button
             size="sm"
             variant="secondary"
@@ -250,7 +193,11 @@ export function FaceStrip() {
         </div>
       </div>
 
-      <PermissionRecovery denied={denied} onRetry={() => void retryDenied()} busy={retrying} />
+      {denied.cam || denied.mic ? (
+        <p className="px-4 pb-3 text-xs text-muted">
+          Permission denied — you still appear as an avatar{denied.mic ? ", and your mic stays off" : ""}.
+        </p>
+      ) : null}
 
       {pickerOpen ? (
         <div className="grid gap-3 border-t border-subtle px-4 py-3 sm:grid-cols-2">
@@ -292,35 +239,28 @@ export default FaceStrip;
 
 function ToggleChip({
   pressed,
-  blocked = false,
   onClick,
   activeLabel,
   inactiveLabel,
-  blockedLabel,
 }: {
   pressed: boolean;
-  blocked?: boolean;
   onClick: () => void;
   activeLabel: string;
   inactiveLabel: string;
-  blockedLabel: string;
 }) {
   return (
     <button
       type="button"
       aria-pressed={pressed}
-      aria-label={blocked ? blockedLabel : pressed ? activeLabel : inactiveLabel}
       onClick={onClick}
       className={cn(
         "h-10 rounded-full border px-3 text-xs font-medium transition-colors duration-200",
-        blocked
-          ? "border-danger/40 bg-danger/15 text-danger"
-          : pressed
-            ? "border-success/40 bg-success/15 text-success"
-            : "border-subtle bg-elevated text-muted hover:text-primary",
+        pressed
+          ? "border-success/40 bg-success/15 text-success"
+          : "border-subtle bg-elevated text-muted hover:text-primary",
       )}
     >
-      {blocked ? blockedLabel : pressed ? activeLabel : inactiveLabel}
+      {pressed ? activeLabel : inactiveLabel}
     </button>
   );
 }
@@ -347,7 +287,6 @@ function FaceTile({
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const showLocal = isSelf && Boolean(localStream?.getVideoTracks().length) && !camForcedOff;
   const showRemote = Boolean(remote?.videoTrack && remote.camEnabled);
-  const liveLabel = speakingLabel(person.displayName, speaking);
 
   useEffect(() => {
     if (!localVideoRef.current) return;
@@ -359,11 +298,9 @@ function FaceTile({
       <div
         className={cn(
           "relative aspect-[3/4] overflow-hidden rounded-2xl border border-subtle bg-elevated",
-          person.isHost && !speaking && "ring-1 ring-warm/70",
-          speaking && "wp-speaking ring-2 ring-live",
+          person.isHost && "ring-1 ring-warm/70",
+          speaking && "ring-2 ring-live",
         )}
-        data-speaking={speaking ? "true" : "false"}
-        aria-label={liveLabel}
       >
         {showLocal ? (
           <video ref={localVideoRef} className="h-full w-full object-cover" autoPlay muted playsInline />
@@ -386,13 +323,6 @@ function FaceTile({
             🔇
           </span>
         )}
-        {speaking ? (
-          <span className="absolute bottom-1.5 right-1.5 flex h-3 items-end gap-0.5" aria-hidden>
-            <span className="wp-speaking-bar h-2 w-0.5 rounded-full bg-live" />
-            <span className="wp-speaking-bar h-3 w-0.5 rounded-full bg-live" />
-            <span className="wp-speaking-bar h-2 w-0.5 rounded-full bg-live" />
-          </span>
-        ) : null}
         {permissionDenied ? (
           <span className="absolute inset-x-1 bottom-1 rounded bg-void/70 px-1 text-[10px] text-muted">
             Cam blocked

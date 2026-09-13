@@ -1,19 +1,9 @@
 "use client";
 
-import {
-  ROOM_PHASE_COPY,
-  ROOM_PHASE_STEPS,
-  isRoomPhaseCurrent,
-  isRoomPhaseReached,
-  roomPhaseBarPercent,
-  type VisibleRoomPhase,
-} from "@/lib/client/room-phase-copy";
-import { cn } from "@/lib/client/cn";
-
 export type RoomLoadPhase = "boot" | "syncing";
 
 export function RoomLoading({ phase }: { phase: RoomLoadPhase }) {
-  const copy = ROOM_PHASE_COPY[phase];
+  const syncing = phase === "syncing";
   return (
     <div
       className="flex min-h-dvh flex-col bg-void"
@@ -31,23 +21,13 @@ export function RoomLoading({ phase }: { phase: RoomLoadPhase }) {
           <div className="relative min-h-[240px] flex-1 overflow-hidden bg-elevated/50">
             <div className="absolute inset-0 animate-pulse bg-[radial-gradient(ellipse_at_center,rgba(232,168,124,0.08),transparent_55%)]" />
             <div className="absolute inset-0 grid place-items-center px-6">
-              <div className="w-full max-w-sm text-center">
-                <p className="sr-only" role="status" aria-live="polite">
-                  {copy.announce}
+              <div className="text-center" role="status">
+                <p className="text-xs font-medium uppercase tracking-[0.22em] text-warm">
+                  {syncing ? "Syncing" : "Skeleton"}
                 </p>
-                <p className="text-xs font-medium uppercase tracking-[0.22em] text-warm">{copy.label}</p>
-                <p className="mt-2 text-sm text-primary">{copy.headline}</p>
-                <p className="mt-1 text-sm text-muted">{copy.detail}</p>
-                <div
-                  className="mx-auto mt-4 h-1 w-44 overflow-hidden rounded-full bg-elevated"
-                  aria-hidden
-                >
-                  <div
-                    className="h-full bg-warm transition-[width] duration-300 ease-out motion-reduce:transition-none"
-                    style={{ width: `${roomPhaseBarPercent(phase)}%` }}
-                  />
-                </div>
-                <RoomPhaseStepper phase={phase} />
+                <p className="mt-2 text-sm text-muted">
+                  {syncing ? "Fetching room snapshot and live playback…" : "Dimming the lights…"}
+                </p>
               </div>
             </div>
           </div>
@@ -67,24 +47,5 @@ export function RoomLoading({ phase }: { phase: RoomLoadPhase }) {
         </div>
       </div>
     </div>
-  );
-}
-
-function RoomPhaseStepper({ phase }: { phase: VisibleRoomPhase }) {
-  return (
-    <ol className="mt-3 flex items-center justify-center gap-2 text-[10px] uppercase tracking-[0.16em] text-muted" aria-label="Room load progress">
-      {ROOM_PHASE_STEPS.map((step, index) => {
-        const current = isRoomPhaseCurrent(phase, step);
-        const reached = isRoomPhaseReached(phase, step);
-        return (
-          <li key={step} className="flex items-center gap-2" aria-current={current ? "step" : undefined}>
-            {index > 0 ? <span aria-hidden className="h-px w-4 bg-subtle" /> : null}
-            <span className={cn(current && "text-warm", reached && !current && "text-primary/70")}>
-              {ROOM_PHASE_COPY[step].label}
-            </span>
-          </li>
-        );
-      })}
-    </ol>
   );
 }

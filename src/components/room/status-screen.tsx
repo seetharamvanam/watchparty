@@ -1,7 +1,6 @@
 import Link from "next/link";
 import { CinemaBackdrop } from "@/components/home/cinema-backdrop";
 import { ERROR_COPY, type ClientErrorCode } from "@/lib/client/errors";
-import { connectionBannerCopy } from "@/lib/client/room-phase-copy";
 import { cn } from "@/lib/client/cn";
 
 export function StatusScreen({
@@ -53,7 +52,7 @@ export function ConnectionBanner({ state }: { state: "connecting" | "connected" 
         state === "lost" ? "bg-danger/15 text-danger" : "bg-elevated text-muted",
       )}
     >
-      {connectionBannerCopy(state === "lost" ? "lost" : "connecting")}
+      {state === "lost" ? "Connection lost. Trying to reconnect…" : "Connecting to the room…"}
     </div>
   );
 }
