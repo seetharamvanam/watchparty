@@ -2,7 +2,7 @@
  * Mock is fail-closed.
  * - Production builds never mock (`NODE_ENV === "production"`).
  * - Local/dev requires an explicit `NEXT_PUBLIC_USE_MOCK_API=true`.
- * - A missing API URL never enables mock.
+ * - A missing URL never enables mock; HTTP uses NEXT_PUBLIC_APP_URL.
  */
 export function isMockApi(): boolean {
   if (process.env.NODE_ENV === "production") return false;
