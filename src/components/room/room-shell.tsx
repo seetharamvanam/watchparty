@@ -1,18 +1,18 @@
 "use client";
 
-import { useState } from "react";
-import { ChatRail } from "@/components/room/chat-rail";
-import { FaceStrip } from "@/components/room/face-strip";
+import dynamic from "next/dynamic";
 import { JoinGate } from "@/components/room/join-gate";
-import { ReactionsOverlay } from "@/components/room/reactions-overlay";
-import { RoomHeader } from "@/components/room/room-header";
-import { ConnectionBanner, StatusScreen } from "@/components/room/status-screen";
-import { SyncedPlayer } from "@/components/room/synced-player";
-import { Button } from "@/components/ui/button";
+import { RoomLoading } from "@/components/room/room-loading";
+import { StatusScreen } from "@/components/room/status-screen";
 import { isRoomCodeFormat, normalizeRoomCode } from "@/lib/client/room-code";
 import { RoomProvider, useRoom } from "@/lib/client/room-context";
 
 const FATAL_CODES = new Set(["ROOM_FULL", "ROOM_EXPIRED", "ROOM_NOT_FOUND"]);
+
+const RoomStage = dynamic(() => import("@/components/room/room-stage"), {
+  ssr: false,
+  loading: () => <RoomLoading phase="syncing" />,
+});
 
 export function RoomShell({ code, initialError }: { code: string; initialError?: string }) {
   const normalized = normalizeRoomCode(code);
@@ -35,11 +35,13 @@ export function RoomShell({ code, initialError }: { code: string; initialError?:
 }
 
 function RoomView() {
-  const { phase, error, connection } = useRoom();
-  const [chatOpen, setChatOpen] = useState(false);
+  const { phase, error } = useRoom();
 
   if (phase === "boot") {
-    return <div className="grid min-h-dvh place-items-center bg-void text-muted">Dimming the lights…</div>;
+    return <RoomLoading phase="boot" />;
+  }
+  if (phase === "syncing") {
+    return <RoomLoading phase="syncing" />;
   }
   if (phase === "error" && error) {
     return (
@@ -54,25 +56,5 @@ function RoomView() {
     return <JoinGate />;
   }
 
-  return (
-    <div className="flex min-h-dvh flex-col bg-void">
-      <RoomHeader />
-      <ConnectionBanner state={connection} />
-      <div className="flex min-h-0 flex-1 flex-col md:flex-row">
-        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-          <div className="relative min-h-0 flex-1">
-            <SyncedPlayer />
-            <ReactionsOverlay />
-          </div>
-          <FaceStrip />
-          <div className="border-t border-subtle p-2 md:hidden">
-            <Button className="w-full" variant="secondary" onClick={() => setChatOpen(true)}>
-              Open chat
-            </Button>
-          </div>
-        </div>
-        <ChatRail mobileOpen={chatOpen} onClose={() => setChatOpen(false)} />
-      </div>
-    </div>
-  );
+  return <RoomStage />;
 }

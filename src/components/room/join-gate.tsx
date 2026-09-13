@@ -37,7 +37,7 @@ export function JoinGate() {
   if (fatal) return <StatusScreen code={fatal} tone="danger" />;
 
   return (
-    <div className="relative flex min-h-dvh items-center justify-center px-6">
+    <div className="relative flex min-h-dvh items-center justify-center px-6" data-room-phase="needs-join">
       <CinemaBackdrop />
       <form
         onSubmit={onSubmit}

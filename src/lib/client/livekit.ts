@@ -1,23 +1,7 @@
+import type { AvSession, AttachableTrack, RemoteFace } from "@/lib/client/av-types";
 import type { AvTokenPayload } from "@/lib/types";
-import type { RemoteTrack } from "livekit-client";
 
-export type RemoteFace = {
-  identity: string;
-  videoTrack: RemoteTrack | null;
-  audioTrack: RemoteTrack | null;
-  camEnabled: boolean;
-  micEnabled: boolean;
-  speaking: boolean;
-};
-
-export interface AvSession {
-  connect(): Promise<void>;
-  setCamera(enabled: boolean, deviceId?: string): Promise<MediaStream | null>;
-  setMicrophone(enabled: boolean, deviceId?: string): Promise<void>;
-  switchDevice(kind: "videoinput" | "audioinput", deviceId: string): Promise<void>;
-  onRemote(handler: (faces: RemoteFace[]) => void): () => void;
-  disconnect(): Promise<void>;
-}
+export type { AttachableTrack, AvSession, RemoteFace } from "@/lib/client/av-types";
 
 export async function connectLiveKit(creds: AvTokenPayload): Promise<AvSession> {
   const {
@@ -47,8 +31,8 @@ export async function connectLiveKit(creds: AvTokenPayload): Promise<AvSession> 
       const mic = micPubs.find((publication) => publication.track) ?? micPubs[0];
       faces.push({
         identity: participant.identity,
-        videoTrack: (camera?.track as RemoteTrack | undefined) ?? null,
-        audioTrack: (mic?.track as RemoteTrack | undefined) ?? null,
+        videoTrack: (camera?.track as AttachableTrack | undefined) ?? null,
+        audioTrack: (mic?.track as AttachableTrack | undefined) ?? null,
         camEnabled: Boolean(camera?.track && !camera.isMuted),
         micEnabled: Boolean(mic?.track && !mic.isMuted),
         speaking: speaking.has(participant.identity),
