@@ -21,6 +21,7 @@ const nextConfig: NextConfig = {
           return `sdk-${(match?.[1] ?? "realtime").replace(".", "")}`;
         },
         chunks: "async",
+        enforce: true,
         priority: 40,
         reuseExistingChunk: true,
       },
