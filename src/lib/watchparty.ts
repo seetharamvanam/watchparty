@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, lt, sql } from "drizzle-orm";
 import { z } from "zod";
 import { getDb, type AppDb } from "@/db";
 import { chatMessages, participants, playbackStates, rooms, type ParticipantRow, type PlaybackRow, type RoomRow } from "@/db/schema";
@@ -14,6 +14,7 @@ import {
   MAX_PLAYBACK_RATE,
   MAX_POSITION_MS,
   MIN_PLAYBACK_RATE,
+  PRESENCE_STALE_MS,
   REACTION_MAX,
   REACTION_RATE_LIMIT_MAX,
   REACTION_RATE_LIMIT_WINDOW_MS,
@@ -193,6 +194,74 @@ function roomStateSnapshot(ctx: RoomContext, now = new Date()) {
 }
 
 /**
+ * Soft disconnect + host handoff. Marks silent participants left, then ensures
+ * exactly one active host (oldest remaining). No kick/mute/lock controls.
+ */
+async function settlePresence(
+  tx: DbTx,
+  roomId: string,
+  now: Date,
+): Promise<{ departed: ParticipantRow[]; newHost: ParticipantRow | null }> {
+  const staleBefore = new Date(now.getTime() - PRESENCE_STALE_MS);
+  const stale = await tx
+    .select()
+    .from(participants)
+    .where(
+      and(eq(participants.roomId, roomId), isNull(participants.leftAt), lt(participants.lastSeenAt, staleBefore)),
+    );
+
+  const departed: ParticipantRow[] = [];
+  for (const row of stale) {
+    await tx
+      .update(participants)
+      .set({ leftAt: now, isHost: false, lastSeenAt: row.lastSeenAt })
+      .where(eq(participants.id, row.id));
+    departed.push(row);
+  }
+
+  const active = await tx
+    .select()
+    .from(participants)
+    .where(and(eq(participants.roomId, roomId), isNull(participants.leftAt)))
+    .orderBy(asc(participants.joinedAt));
+
+  if (active.length === 0) {
+    return { departed, newHost: null };
+  }
+
+  const intended = active[0];
+  const extras = active.filter((row) => row.isHost && row.id !== intended.id);
+  if (intended.isHost && extras.length === 0) {
+    return { departed, newHost: null };
+  }
+
+  await tx.update(participants).set({ isHost: false }).where(eq(participants.roomId, roomId));
+  await tx.update(participants).set({ isHost: true }).where(eq(participants.id, intended.id));
+  return { departed, newHost: { ...intended, isHost: true } };
+}
+
+async function publishPresenceHandoff(
+  code: string,
+  departed: ParticipantRow[],
+  newHost: ParticipantRow | null,
+) {
+  for (const row of departed) {
+    await publishRoomEvent(code, "participant_left", {
+      type: "participant_left",
+      participantId: row.id,
+      displayName: row.displayName,
+    });
+  }
+  if (newHost) {
+    await publishRoomEvent(code, "host_changed", {
+      type: "host_changed",
+      host: serializeParticipant(newHost),
+    });
+    await publishRoomEvent(code, "state_snapshot", roomStateSnapshot(await loadContext(code)));
+  }
+}
+
+/**
  * Serialize host playback/media writes against the room row so leave+transfer
  * cannot overlap a mutation (at most one host can command).
  */
@@ -357,6 +426,8 @@ export async function joinRoom(input: unknown): Promise<JoinPayload> {
       throw roomExpired();
     }
 
+    const settled = await settlePresence(tx, room.id, now);
+
     const [countRow] = await tx
       .select({ count: sql<number>`cast(count(*) as int)` })
       .from(participants)
@@ -377,7 +448,7 @@ export async function joinRoom(input: unknown): Promise<JoinPayload> {
     });
     await tx.update(rooms).set({ lastPresenceAt: now, expiresAt: nowPlusTtl(now) }).where(eq(rooms.id, room.id));
 
-    return room;
+    return { room, settled };
   });
 
   const [participant] = await db.select().from(participants).where(eq(participants.id, participantId)).limit(1);
@@ -385,19 +456,22 @@ export async function joinRoom(input: unknown): Promise<JoinPayload> {
     throw new Error("Failed to join room");
   }
 
-  const ctx = await loadContext(joined.code);
-  const publicParticipants = ctx.active.map(serializeParticipant);
+  await publishPresenceHandoff(joined.room.code, joined.settled.departed, joined.settled.newHost);
 
-  await publishRoomEvent(joined.code, "participant_joined", {
+  const ctx = await loadContext(joined.room.code);
+  const publicParticipants = ctx.active.map(serializeParticipant);
+  const me = publicParticipants.find((row) => row.id === participant.id) ?? serializeParticipant(participant);
+
+  await publishRoomEvent(joined.room.code, "participant_joined", {
     type: "participant_joined",
-    participant: serializeParticipant(participant),
+    participant: me,
     participantCount: ctx.active.length,
   });
-  await publishRoomEvent(joined.code, "state_snapshot", roomStateSnapshot(ctx));
+  await publishRoomEvent(joined.room.code, "state_snapshot", roomStateSnapshot(ctx));
 
   return {
     room: serializeRoom(ctx.room, ctx.active.length),
-    participant: serializeParticipant(participant),
+    participant: me,
     sessionToken,
     playback: serializePlayback(ctx.playback),
     participants: publicParticipants,
@@ -596,12 +670,52 @@ export async function postReaction(req: Request, code: string, input: unknown) {
 }
 
 export async function heartbeat(req: Request, code: string) {
-  const { participant, room } = await requireSession(req, code);
-  await touchPresence(room.id, participant.id);
-  const ctx = await loadContext(room.code);
+  const token = readBearerToken(req);
+  if (!token) {
+    throw unauthorized();
+  }
+  const normalized = normalizeRoomCode(code);
+  if (!isRoomCodeFormat(normalized)) {
+    throw roomNotFound();
+  }
+
+  const db = getDb();
+  const now = new Date();
+  const result = await db.transaction(async (tx) => {
+    const [room] = await tx.select().from(rooms).where(eq(rooms.code, normalized)).for("update");
+    if (!room) {
+      throw roomNotFound();
+    }
+    assertNotExpired(room);
+
+    const [participant] = await tx
+      .select()
+      .from(participants)
+      .where(eq(participants.sessionTokenHash, hashSessionToken(token)))
+      .limit(1);
+    if (!participant || participant.leftAt) {
+      throw unauthorized();
+    }
+    if (participant.roomId !== room.id) {
+      throw forbidden("Session does not belong to this room");
+    }
+
+    await tx
+      .update(rooms)
+      .set({ lastPresenceAt: now, expiresAt: nowPlusTtl(now) })
+      .where(eq(rooms.id, room.id));
+    await tx.update(participants).set({ lastSeenAt: now }).where(eq(participants.id, participant.id));
+
+    const settled = await settlePresence(tx, room.id, now);
+    const [fresh] = await tx.select().from(participants).where(eq(participants.id, participant.id)).limit(1);
+    return { room, participant: fresh ?? participant, settled };
+  });
+
+  await publishPresenceHandoff(result.room.code, result.settled.departed, result.settled.newHost);
+  const ctx = await loadContext(result.room.code);
   return {
     room: serializeRoom(ctx.room, ctx.active.length),
-    participant: serializeParticipant(participant),
+    participant: serializeParticipant(result.participant),
     expiresAt: ctx.room.expiresAt.toISOString(),
   };
 }
@@ -619,7 +733,7 @@ export async function leaveRoom(req: Request, code: string) {
   const db = getDb();
   const now = new Date();
 
-  const { left, newHost, roomCode } = await db.transaction(async (tx) => {
+  const { left, departed, newHost, roomCode } = await db.transaction(async (tx) => {
     const [room] = await tx.select().from(rooms).where(eq(rooms.code, normalized)).for("update");
     if (!room) {
       throw roomNotFound();
@@ -643,23 +757,13 @@ export async function leaveRoom(req: Request, code: string) {
       .set({ leftAt: now, isHost: false, lastSeenAt: now })
       .where(eq(participants.id, participant.id));
 
-    let next: ParticipantRow | null = null;
-    if (participant.isHost) {
-      // Drop every host bit first so two participants can never both command.
-      await tx.update(participants).set({ isHost: false }).where(eq(participants.roomId, room.id));
-      const [nextHost] = await tx
-        .select()
-        .from(participants)
-        .where(and(eq(participants.roomId, room.id), isNull(participants.leftAt)))
-        .orderBy(asc(participants.joinedAt))
-        .limit(1);
-      if (nextHost) {
-        await tx.update(participants).set({ isHost: true }).where(eq(participants.id, nextHost.id));
-        next = { ...nextHost, isHost: true };
-      }
-    }
-
-    return { left: participant, newHost: next, roomCode: room.code };
+    const settled = await settlePresence(tx, room.id, now);
+    return {
+      left: participant,
+      departed: settled.departed,
+      newHost: settled.newHost,
+      roomCode: room.code,
+    };
   });
 
   await publishRoomEvent(roomCode, "participant_left", {
@@ -667,15 +771,7 @@ export async function leaveRoom(req: Request, code: string) {
     participantId: left.id,
     displayName: left.displayName,
   });
-
-  if (newHost) {
-    await publishRoomEvent(roomCode, "host_changed", {
-      type: "host_changed",
-      host: serializeParticipant(newHost),
-    });
-    const ctx = await loadContext(roomCode);
-    await publishRoomEvent(roomCode, "state_snapshot", roomStateSnapshot(ctx));
-  }
+  await publishPresenceHandoff(roomCode, departed, newHost);
 
   return {
     ok: true,

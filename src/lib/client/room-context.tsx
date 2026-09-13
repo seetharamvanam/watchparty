@@ -264,6 +264,16 @@ export function RoomProvider({ code, children }: { code: string; children: React
     return () => window.clearInterval(id);
   }, [api, code, phase, sessionToken]);
 
+  useEffect(() => {
+    if (!sessionToken) return;
+    const onPageHide = (event: PageTransitionEvent) => {
+      if (event.persisted) return;
+      void api.leave(code, sessionToken).catch(() => undefined);
+    };
+    window.addEventListener("pagehide", onPageHide);
+    return () => window.removeEventListener("pagehide", onPageHide);
+  }, [api, code, sessionToken]);
+
   useEffect(() => () => realtimeRef.current?.close(), []);
 
   const join = useCallback(

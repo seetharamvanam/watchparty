@@ -319,7 +319,9 @@ Response: `{ "room", "participant", "expiresAt" }`.
 
 `POST /api/rooms/:code/leave` — session required.
 
-Marks the caller as left. If they were host, the **oldest active** participant (earliest `joinedAt`) becomes host. The leave transaction locks the room row, clears every `isHost` bit, then promotes exactly one successor so two hosts cannot command. Ably emits `host_changed` and a fresh `state_snapshot`. The previous host’s session is revoked (`leftAt` set); further playback POSTs are `UNAUTHORIZED`.
+Marks the caller as left. If they were host, the **oldest active** participant (earliest `joinedAt`) becomes host. The leave transaction locks the room row, then `settlePresence` promotes exactly one successor so two hosts cannot command. Ably emits `host_changed` and a fresh `state_snapshot`. The previous host’s session is revoked (`leftAt` set); further playback POSTs are `UNAUTHORIZED`.
+
+**Soft disconnect (not kick / mute / lock):** clients also `POST /leave` on `pagehide` (tab close / navigate, not bfcache). If that request never arrives, `POST /presence` and `POST /join` reap participants whose `lastSeenAt` is older than **120s** (`PRESENCE_STALE_MS`) and run the same single-host handoff. A vanished host cannot keep playback authority. There is no kick, mute, or lock-host API in this contract.
 
 Response:
 
