@@ -618,17 +618,13 @@ export async function leaveRoom(req: Request, code: string) {
 
   const db = getDb();
   const now = new Date();
-  let left: ParticipantRow | null = null;
-  let newHost: ParticipantRow | null = null;
-  let roomCode = normalized;
 
-  await db.transaction(async (tx) => {
+  const { left, newHost, roomCode } = await db.transaction(async (tx) => {
     const [room] = await tx.select().from(rooms).where(eq(rooms.code, normalized)).for("update");
     if (!room) {
       throw roomNotFound();
     }
     assertNotExpired(room);
-    roomCode = room.code;
 
     const [participant] = await tx
       .select()
@@ -641,13 +637,13 @@ export async function leaveRoom(req: Request, code: string) {
     if (participant.roomId !== room.id) {
       throw forbidden("Session does not belong to this room");
     }
-    left = participant;
 
     await tx
       .update(participants)
       .set({ leftAt: now, isHost: false, lastSeenAt: now })
       .where(eq(participants.id, participant.id));
 
+    let next: ParticipantRow | null = null;
     if (participant.isHost) {
       // Drop every host bit first so two participants can never both command.
       await tx.update(participants).set({ isHost: false }).where(eq(participants.roomId, room.id));
@@ -659,14 +655,12 @@ export async function leaveRoom(req: Request, code: string) {
         .limit(1);
       if (nextHost) {
         await tx.update(participants).set({ isHost: true }).where(eq(participants.id, nextHost.id));
-        newHost = { ...nextHost, isHost: true };
+        next = { ...nextHost, isHost: true };
       }
     }
-  });
 
-  if (!left) {
-    throw unauthorized();
-  }
+    return { left: participant, newHost: next, roomCode: room.code };
+  });
 
   await publishRoomEvent(roomCode, "participant_left", {
     type: "participant_left",
