@@ -62,6 +62,43 @@ body {
   }
 }
 
+@keyframes speakingPulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 92, 92, 0.42);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(255, 92, 92, 0);
+  }
+}
+
+@keyframes speakingBar {
+  0%,
+  100% {
+    transform: scaleY(0.35);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+.wp-speaking {
+  animation: speakingPulse 1.4s ease-out infinite;
+}
+
+.wp-speaking-bar {
+  transform-origin: bottom;
+  animation: speakingBar 0.7s ease-in-out infinite;
+}
+
+.wp-speaking-bar:nth-child(2) {
+  animation-delay: 0.12s;
+}
+
+.wp-speaking-bar:nth-child(3) {
+  animation-delay: 0.24s;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -69,5 +106,15 @@ body {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+
+  .wp-speaking {
+    animation: none;
+    box-shadow: 0 0 0 2px rgba(255, 92, 92, 0.7);
+  }
+
+  .wp-speaking-bar {
+    animation: none;
+    transform: scaleY(0.7);
   }
 }

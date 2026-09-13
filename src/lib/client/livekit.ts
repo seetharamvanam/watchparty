@@ -16,6 +16,7 @@ export async function connectLiveKit(creds: AvTokenPayload): Promise<AvSession> 
   let videoTrack: Awaited<ReturnType<typeof createLocalVideoTrack>> | null = null;
   let audioTrack: Awaited<ReturnType<typeof createLocalAudioTrack>> | null = null;
   const listeners = new Set<(faces: RemoteFace[]) => void>();
+  const speakerListeners = new Set<(identities: string[]) => void>();
   let speaking = new Set<string>();
 
   const emitRemote = () => {
@@ -47,9 +48,14 @@ export async function connectLiveKit(creds: AvTokenPayload): Promise<AvSession> 
   room.on(RoomEvent.TrackUnmuted, emitRemote);
   room.on(RoomEvent.ParticipantConnected, emitRemote);
   room.on(RoomEvent.ParticipantDisconnected, emitRemote);
-  room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
-    speaking = new Set(speakers.map((speaker) => speaker.identity));
+  const emitSpeakers = (identities: string[]) => {
+    speaking = new Set(identities);
     emitRemote();
+    for (const listener of speakerListeners) listener(identities);
+  };
+
+  room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
+    emitSpeakers(speakers.map((speaker) => speaker.identity));
   });
 
   return {
@@ -91,6 +97,13 @@ export async function connectLiveKit(creds: AvTokenPayload): Promise<AvSession> 
       emitRemote();
       return () => {
         listeners.delete(handler);
+      };
+    },
+    onSpeakers(handler) {
+      speakerListeners.add(handler);
+      handler([...speaking]);
+      return () => {
+        speakerListeners.delete(handler);
       };
     },
     async disconnect() {
