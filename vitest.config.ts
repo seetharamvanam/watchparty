@@ -8,6 +8,7 @@ export default defineConfig({
     fileParallelism: false,
     sequence: { concurrent: false },
   },
+  // Tests use tsconfig.test.json paths via the alias below; Next's tsconfig excludes tests.
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),

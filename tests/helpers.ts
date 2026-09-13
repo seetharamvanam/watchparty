@@ -1,17 +1,11 @@
-import { readFileSync } from "node:fs";
-import path from "node:path";
-import { PGlite } from "@electric-sql/pglite";
-import { drizzle } from "drizzle-orm/pglite";
 import { eq } from "drizzle-orm";
-import { getDb, setTestDb } from "@/db";
-import * as schema from "@/db/schema";
+import { getDb } from "@/db";
 import { rooms } from "@/db/schema";
 import { resetPublishedEvents } from "@/lib/ably";
 import { resetRateLimits } from "@/lib/rate-limit";
 import { POST as createRoomHandler } from "@/app/api/rooms/route";
 import { POST as joinRoomHandler } from "@/app/api/rooms/join/route";
-
-const MIGRATION_SQL = readFileSync(path.resolve(process.cwd(), "drizzle/0000_init.sql"), "utf8");
+import { createTestDb } from "./db";
 
 export function jsonRequest(url: string, method: string, body?: unknown, token?: string) {
   const headers = new Headers({ "content-type": "application/json" });
@@ -32,10 +26,7 @@ export function params(code: string) {
 export async function resetTestState() {
   resetRateLimits();
   resetPublishedEvents();
-  const client = new PGlite();
-  await client.exec(MIGRATION_SQL);
-  setTestDb(drizzle({ client, schema }));
-  return client;
+  return createTestDb();
 }
 
 export async function expireRoom(code: string) {
