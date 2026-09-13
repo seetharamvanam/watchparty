@@ -19,5 +19,6 @@ export interface AvSession {
   setMicrophone(enabled: boolean, deviceId?: string): Promise<void>;
   switchDevice(kind: "videoinput" | "audioinput", deviceId: string): Promise<void>;
   onRemote(handler: (faces: RemoteFace[]) => void): () => void;
+  onSpeakers(handler: (identities: string[]) => void): () => void;
   disconnect(): Promise<void>;
 }

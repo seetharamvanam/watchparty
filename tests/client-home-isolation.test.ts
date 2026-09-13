@@ -26,6 +26,9 @@ const FORBIDDEN = [
   /from\s+["']@\/components\/room\/(face-strip|synced-player|youtube-stage|html5-stage|room-stage)["']/,
   /import\(["']ably["']\)/,
   /import\(["']livekit-client["']\)/,
+  /import\(["']hls\.js["']\)/,
+  /import\(["']@\/lib\/client\/realtime["']\)/,
+  /import\(["']@\/lib\/client\/livekit["']\)/,
 ];
 
 const IMPORT_RE =
@@ -99,6 +102,25 @@ describe("home landing graph stays off Ably/LiveKit", () => {
       for (const rule of FORBIDDEN) {
         expect(source).not.toMatch(rule);
       }
+    }
+  });
+
+  it("keeps join-gate off Ably/LiveKit so it cannot pull SDK chunks", () => {
+    const source = readFileSync(path.join(SRC, "components/room/join-gate.tsx"), "utf8");
+    const sdkRules = [
+      /from\s+["']ably["']/,
+      /from\s+["']livekit-client["']/,
+      /from\s+["']hls\.js["']/,
+      /from\s+["']@\/lib\/client\/realtime["']/,
+      /from\s+["']@\/lib\/client\/livekit["']/,
+      /import\(["']ably["']\)/,
+      /import\(["']livekit-client["']\)/,
+      /import\(["']hls\.js["']\)/,
+      /import\(["']@\/lib\/client\/realtime["']\)/,
+      /import\(["']@\/lib\/client\/livekit["']\)/,
+    ];
+    for (const rule of sdkRules) {
+      expect(source).not.toMatch(rule);
     }
   });
 });

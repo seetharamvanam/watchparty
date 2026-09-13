@@ -4,14 +4,16 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { getAppUrl } from "@/lib/client/config";
+import { whoIsHere } from "@/lib/client/presence";
 import { useRoom } from "@/lib/client/room-context";
 
 export function RoomHeader() {
-  const { code, room, participants, leave, mock } = useRoom();
+  const { code, room, participants, leave, mock, connection, me } = useRoom();
   const router = useRouter();
   const [copied, setCopied] = useState(false);
-  const seats = room?.participantCount ?? participants.length;
+  const seats = participants.length || room?.participantCount || 0;
   const max = room?.maxParticipants ?? 8;
+  const presence = whoIsHere(participants, me?.id);
   const invite = `${getAppUrl()}/r/${code}`;
 
   async function copyLink() {
@@ -50,11 +52,32 @@ export function RoomHeader() {
             Mock
           </span>
         ) : null}
+        {connection === "connected" ? (
+          <span
+            className="hidden items-center gap-1.5 rounded-full border border-success/30 px-2 py-0.5 text-[10px] uppercase tracking-wider text-success sm:inline-flex"
+            aria-label="Room is ready"
+          >
+            <span className="h-1.5 w-1.5 rounded-full bg-success" aria-hidden />
+            Ready
+          </span>
+        ) : null}
       </div>
       <div className="flex items-center gap-2 sm:gap-3">
-        <p className="text-sm tabular-nums text-muted" aria-label={`${seats} of ${max} seats`}>
-          <span className="text-primary">{seats}</span>/{max}
-        </p>
+        <div className="min-w-0 text-right">
+          <p
+            className="text-sm tabular-nums text-muted"
+            aria-label={`${presence.announce}. ${seats} of ${max} seats.`}
+            title={presence.namesLabel || undefined}
+          >
+            <span className="text-primary">{presence.countLabel}</span>
+            <span className="hidden text-muted sm:inline"> · {max} max</span>
+          </p>
+          {presence.namesLabel ? (
+            <p className="hidden max-w-[14rem] truncate text-[11px] text-muted lg:block" title={presence.namesLabel}>
+              {presence.namesLabel}
+            </p>
+          ) : null}
+        </div>
         <Button size="sm" variant="ghost" onClick={onLeave}>
           Leave
         </Button>

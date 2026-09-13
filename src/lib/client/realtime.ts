@@ -1,6 +1,7 @@
 import { isMockApi } from "@/lib/client/config";
 import { subscribeMockEvents } from "@/lib/client/mock-bus";
 import type { RealtimeTokenResponse, WatchPartyApi } from "@/lib/client/api-types";
+import { createEarlySubscriber } from "@/lib/client/realtime-handoff";
 import type { RealtimeConnection, RoomEvent } from "@/lib/client/room-events";
 
 export type { RealtimeConnection, RoomEvent } from "@/lib/client/room-events";
@@ -36,19 +37,22 @@ export async function connectAbly(roomCode: string, token: RealtimeTokenResponse
   });
   const channelName = token.channel || `room:${roomCode.toUpperCase()}`;
   const channel = client.channels.get(channelName);
+  const early = createEarlySubscriber<RoomEvent>();
+  const listener = (message: { data?: RoomEvent; name?: string }) => {
+    const data = message.data;
+    if (!data) return;
+    early.dispatch({ ...data, type: data.type || message.name || "" });
+  };
+  // Subscribe before attach so attach-time messages are not dropped.
+  channel.subscribe(listener);
   await channel.attach();
 
   return {
     subscribe(handler) {
-      const listener = (message: { data?: RoomEvent; name?: string }) => {
-        const data = message.data;
-        if (!data) return;
-        handler({ ...data, type: data.type || message.name || "" });
-      };
-      channel.subscribe(listener);
-      return () => channel.unsubscribe(listener);
+      return early.subscribe(handler);
     },
     close() {
+      channel.unsubscribe(listener);
       void channel.detach();
       client.close();
     },

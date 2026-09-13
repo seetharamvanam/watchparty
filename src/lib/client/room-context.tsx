@@ -20,6 +20,8 @@ import {
   type RealtimeConnection,
   type RoomEvent,
 } from "@/lib/client/room-events";
+import { applyLeaveToRoster, nextParticipantCount } from "@/lib/client/presence";
+import { createEventHandoff } from "@/lib/client/realtime-handoff";
 import { loadChatAfterReady, loadRoomReady } from "@/lib/client/room-ready";
 import { clearSession, readSession, writeSession } from "@/lib/client/session";
 import type {
@@ -122,11 +124,18 @@ export function RoomProvider({ code, children }: { code: string; children: React
           );
         }
         break;
-      case "participant_left":
-        if (event.participantId) {
-          setParticipants((current) => current.filter((p) => p.id !== event.participantId));
-        }
+      case "participant_left": {
+        setParticipants((current) => {
+          const next = applyLeaveToRoster(current, event.participantId);
+          const count = nextParticipantCount({
+            eventCount: event.participantCount,
+            rosterLength: next.length,
+          });
+          setRoom((room) => (room ? { ...room, participantCount: count } : room));
+          return next;
+        });
         break;
+      }
       case "host_changed":
         if (event.host) {
           const hostId = event.host.id;
@@ -191,17 +200,14 @@ export function RoomProvider({ code, children }: { code: string; children: React
       setConnection("connecting");
       setError(null);
 
-      const buffered: RoomEvent[] = [];
-      let releaseBuffer: (() => void) | undefined;
+      const handoff = createEventHandoff(handleEvent);
 
       const { snapshot, realtime, realtimeFailed } = await loadRoomReady({
         getSnapshot: () => api.getRoom(code, token),
         connectRealtime: async () => {
           const { connectRealtime } = await import("@/lib/client/realtime");
           const connection = await connectRealtime(api, code, token);
-          releaseBuffer = connection.subscribe((event) => {
-            buffered.push(event);
-          });
+          connection.subscribe((event) => handoff.push(event));
           return connection;
         },
       });
@@ -218,10 +224,8 @@ export function RoomProvider({ code, children }: { code: string; children: React
 
       realtimeRef.current?.close();
       if (realtime) {
-        releaseBuffer?.();
         realtimeRef.current = realtime;
-        realtime.subscribe(handleEvent);
-        for (const event of buffered) handleEvent(event);
+        handoff.release();
         setConnection("connected");
       } else {
         realtimeRef.current = null;
