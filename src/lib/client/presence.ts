@@ -37,3 +37,22 @@ export function tileCamLabel(options: { camOn: boolean; camDenied?: boolean }): 
 export function tileMicLabel(micOn: boolean): string {
   return micOn ? "Mic on" : "Mic off";
 }
+
+export function applyLeaveToRoster<T extends { id: string }>(
+  people: T[],
+  participantId: string | undefined,
+): T[] {
+  if (!participantId) return people;
+  return people.filter((person) => person.id !== participantId);
+}
+
+/** Prefer the event count when the server sent one; otherwise the live roster. */
+export function nextParticipantCount(options: {
+  eventCount?: number;
+  rosterLength: number;
+}): number {
+  if (typeof options.eventCount === "number" && Number.isFinite(options.eventCount)) {
+    return Math.max(0, options.eventCount);
+  }
+  return Math.max(0, options.rosterLength);
+}

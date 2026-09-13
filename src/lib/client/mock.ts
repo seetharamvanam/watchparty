@@ -381,6 +381,7 @@ export function createMockApi(): WatchPartyApi {
         roomCode: normalized,
         participantId: actor.id,
         displayName: actor.displayName,
+        participantCount: record.room.participantCount,
       });
       if (newHost) {
         emitMockEvent({ type: "host_changed", roomCode: normalized, host: newHost });

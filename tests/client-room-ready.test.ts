@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createEarlySubscriber, createEventHandoff } from "@/lib/client/realtime-handoff";
 import { isStalePlaybackEvent, playbackFromEvent } from "@/lib/client/room-events";
 import { loadChatAfterReady, loadRoomReady } from "@/lib/client/room-ready";
 import type { PlaybackState, RoomView } from "@/lib/types";
@@ -87,6 +88,51 @@ describe("loadChatAfterReady", () => {
       throw new Error("RATE_LIMITED");
     });
     expect(messages).toEqual([]);
+  });
+});
+
+describe("realtime subscribe handoff", () => {
+  it("buffers events until release then applies live events in order", () => {
+    const applied: string[] = [];
+    const handoff = createEventHandoff<string>((event) => applied.push(event));
+
+    handoff.push("joined-during-connect");
+    handoff.push("play-during-snapshot");
+    expect(handoff.isLive).toBe(false);
+    expect(handoff.size).toBe(2);
+    expect(applied).toEqual([]);
+
+    handoff.release();
+    expect(applied).toEqual(["joined-during-connect", "play-during-snapshot"]);
+    expect(handoff.isLive).toBe(true);
+    expect(handoff.size).toBe(0);
+
+    handoff.push("leave-after-ready");
+    expect(applied).toEqual(["joined-during-connect", "play-during-snapshot", "leave-after-ready"]);
+  });
+
+  it("is safe when subscribe connects after the snapshot is already applied", () => {
+    const applied: string[] = [];
+    const handoff = createEventHandoff<string>((event) => applied.push(event));
+
+    handoff.release();
+    expect(applied).toEqual([]);
+    handoff.push("late-subscribe-join");
+    expect(applied).toEqual(["late-subscribe-join"]);
+  });
+
+  it("holds attach-time messages until the first caller subscribe", () => {
+    const applied: string[] = [];
+    const early = createEarlySubscriber<string>();
+
+    early.dispatch("after-attach");
+    early.dispatch("before-caller-subscribe");
+    const stop = early.subscribe((event) => applied.push(event));
+    expect(applied).toEqual(["after-attach", "before-caller-subscribe"]);
+
+    early.dispatch("live");
+    expect(applied).toEqual(["after-attach", "before-caller-subscribe", "live"]);
+    stop();
   });
 });
 

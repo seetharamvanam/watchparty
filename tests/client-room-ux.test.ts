@@ -10,7 +10,7 @@ import {
   shouldClearDenied,
   watchMediaPermissionGrant,
 } from "@/lib/client/media-permissions";
-import { tileCamLabel, tileMicLabel, whoIsHere } from "@/lib/client/presence";
+import { applyLeaveToRoster, nextParticipantCount, tileCamLabel, tileMicLabel, whoIsHere } from "@/lib/client/presence";
 import {
   ROOM_PHASE_COPY,
   ROOM_PHASE_STEPS,
@@ -153,6 +153,19 @@ describe("presence chrome", () => {
     expect(presence.namesLabel).toMatch(/Gus/);
     expect(presence.announce).toMatch(/2 here/);
     expect(whoIsHere([]).announce).toMatch(/waiting/i);
+  });
+
+  it("keeps participantCount aligned with the roster on leave", () => {
+    const roster = [
+      { id: "p1", displayName: "Ada", isHost: true },
+      { id: "p2", displayName: "Gus" },
+    ];
+    const next = applyLeaveToRoster(roster, "p2");
+    expect(next.map((person) => person.id)).toEqual(["p1"]);
+    expect(nextParticipantCount({ eventCount: 1, rosterLength: next.length })).toBe(1);
+    expect(nextParticipantCount({ rosterLength: next.length })).toBe(1);
+    expect(applyLeaveToRoster(next, "p2")).toEqual(next);
+    expect(whoIsHere(next, "p1").countLabel).toBe("1 here");
   });
 
   it("surfaces mute and camera state on tiles", () => {

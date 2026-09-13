@@ -11,7 +11,7 @@ export function RoomHeader() {
   const { code, room, participants, leave, mock, connection, me } = useRoom();
   const router = useRouter();
   const [copied, setCopied] = useState(false);
-  const seats = room?.participantCount ?? participants.length;
+  const seats = participants.length || room?.participantCount || 0;
   const max = room?.maxParticipants ?? 8;
   const presence = whoIsHere(participants, me?.id);
   const invite = `${getAppUrl()}/r/${code}`;
