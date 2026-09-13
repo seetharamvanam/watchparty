@@ -1,60 +1,73 @@
+@import "tailwindcss";
+
 :root {
   color-scheme: dark;
-  --bg: #0c0d12;
-  --panel: #161821;
-  --text: #f4f1ea;
-  --muted: #a8a29a;
-  --accent: #e8b86d;
-  --line: #2a2d3a;
+  --bg-void: #0b0a0f;
+  --bg-surface: #14121a;
+  --bg-elevated: #1e1b26;
+  --border-subtle: #2a2733;
+  --text-primary: #f4f0ea;
+  --text-muted: #9b9488;
+  --accent-warm: #e8a87c;
+  --accent-glow: #c47a5a;
+  --danger: #e57373;
+  --success: #7dcea0;
+  --live-dot: #ff5c5c;
 }
 
-* {
-  box-sizing: border-box;
+@theme inline {
+  --color-void: var(--bg-void);
+  --color-surface: var(--bg-surface);
+  --color-elevated: var(--bg-elevated);
+  --color-subtle: var(--border-subtle);
+  --color-primary: var(--text-primary);
+  --color-muted: var(--text-muted);
+  --color-warm: var(--accent-warm);
+  --color-glow: var(--accent-glow);
+  --color-danger: var(--danger);
+  --color-success: var(--success);
+  --color-live: var(--live-dot);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
 }
 
 html,
 body {
   margin: 0;
   min-height: 100%;
-  background: radial-gradient(circle at top, #1a1d2b 0%, var(--bg) 55%);
-  color: var(--text);
-  font-family: Georgia, "Times New Roman", serif;
+  background: var(--bg-void);
+  color: var(--text-primary);
 }
 
 body {
-  padding: 2.5rem 1.25rem 4rem;
+  font-family: var(--font-geist-sans), Inter, system-ui, sans-serif;
 }
 
-main {
-  max-width: 720px;
-  margin: 0 auto;
+::selection {
+  background: rgba(232, 168, 124, 0.35);
+  color: var(--text-primary);
 }
 
-h1 {
-  font-size: 2.4rem;
-  letter-spacing: -0.03em;
-  margin: 0 0 0.4rem;
+@keyframes floatUp {
+  0% {
+    transform: translateY(0) scale(0.9);
+    opacity: 0;
+  }
+  12% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(-160px) scale(1.15);
+    opacity: 0;
+  }
 }
 
-p,
-li {
-  color: var(--muted);
-  line-height: 1.55;
-}
-
-.panel {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 16px;
-  padding: 1.25rem 1.4rem;
-  margin-top: 1.5rem;
-}
-
-code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: var(--accent);
-}
-
-a {
-  color: var(--accent);
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

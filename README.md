@@ -62,6 +62,7 @@ Exact names (also listed in `.env.example`):
 | --- | --- |
 | `NEXT_PUBLIC_LIVEKIT_URL` | LiveKit Cloud WebSocket URL returned by `/av-token` |
 | `NEXT_PUBLIC_APP_URL` | Public origin of this app |
+| `NEXT_PUBLIC_USE_MOCK_API` | Local/dev only. `true` enables the in-browser mock. Ignored in production builds. Never inferred from a missing URL. |
 
 ## Key endpoints
 
@@ -81,6 +82,22 @@ Exact names (also listed in `.env.example`):
 | `POST` | `/api/rooms/:code/leave` | Leave; host transfers to oldest active |
 
 See [`API.md`](./API.md) for request/response shapes, error codes, and Ably events.
+
+## Frontend
+
+Cinema UI lives in this same Next.js app (`src/app`, `src/components`, `src/lib/client`). It talks to the Backend routes over [`API.md`](./API.md). It does not touch the database.
+
+- Home `/` — create (legal notice) and join
+- Room `/r/[code]` — synced player, always-visible face filmstrip, chat + reactions
+- Ably is **subscribe-only**. Playback, chat, reactions, presence, and leave go through REST; the server publishes events
+- LiveKit: connect on enter (receive remote faces), cam/mic default off. Remote camera tracks render in the filmstrip; cam-off and permission-denied stay avatars
+- Media allowlist matches Backend: HTTPS YouTube watch / youtu.be / embed (11-char id); HTTPS paths ending `.mp4` / `.webm` / `.m3u8`. Shorts / Live / Clips / Music → `YOUTUBE_NOT_EMBEDDABLE`
+
+### Mock (local/dev only)
+
+Set `NEXT_PUBLIC_USE_MOCK_API=true` in `.env.local`. Production builds never mock (`NODE_ENV=production`). An empty API URL does **not** enable mock — the UI calls same-origin `/api`.
+
+Reserved mock codes: `FULL88` → `ROOM_FULL`, `ENDED8` → `ROOM_EXPIRED`.
 
 ## Scripts
 

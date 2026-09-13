@@ -1,26 +1,38 @@
+import { CinemaBackdrop } from "@/components/home/cinema-backdrop";
+import { CreateParty } from "@/components/home/create-party";
+import { JoinParty } from "@/components/home/join-party";
+import { isMockApi } from "@/lib/client/config";
+
 export default function HomePage() {
   return (
-    <main>
-      <p>Watch together. Stay in sync.</p>
-      <h1>Watch Party</h1>
-      <p>
-        Friends watch a movie or video at the same time and see and hear each other over
-        camera and microphone. There are no accounts, no recordings, and the server never
-        fetches or stores media bytes.
-      </p>
-      <section className="panel">
-        <p>
-          Join with a 6-character room code. Rooms hold at most 8 people and expire 24 hours
-          after the last presence heartbeat.
+    <div className="relative min-h-dvh overflow-hidden">
+      <CinemaBackdrop />
+      <main className="relative z-10 mx-auto flex min-h-dvh w-full max-w-5xl flex-col justify-center px-5 py-16">
+        <p className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.22em] text-warm">
+          <span className="relative flex h-2 w-2">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-live opacity-60" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-live" />
+          </span>
+          Live together
         </p>
-        <p>
-          Hosts share a YouTube watch / youtu.be / embed URL or a direct HTTPS{" "}
-          <code>.mp4</code>, <code>.webm</code>, or <code>.m3u8</code>. Clients load the
-          media themselves. Playback sync uses Ably; live A/V uses LiveKit Cloud tokens
-          minted by this API.
+        <h1 className="mt-3 max-w-xl text-4xl leading-tight tracking-tight text-primary sm:text-5xl">
+          Watch the movie.
+          <span className="block text-warm">Keep the faces.</span>
+        </h1>
+        <p className="mt-4 max-w-lg text-base leading-7 text-muted">
+          A living-room night in the browser. Playback stays in sync. Cameras stay on the couch —
+          not buried behind a chat thread.
         </p>
-        <p>Backend contract: <code>API.md</code> in the repository root.</p>
-      </section>
-    </main>
+        {isMockApi() ? (
+          <p className="mt-3 text-xs text-muted">
+            Mock API is on — local/dev only. Open a second tab to join your own room.
+          </p>
+        ) : null}
+        <div className="mt-10 grid gap-6 md:grid-cols-2">
+          <CreateParty />
+          <JoinParty />
+        </div>
+      </main>
+    </div>
   );
 }
