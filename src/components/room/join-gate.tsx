@@ -46,7 +46,7 @@ export function JoinGate() {
         <p className="font-mono text-sm tracking-[0.28em] text-warm">{code}</p>
         <h1 className="mt-2 text-2xl tracking-tight text-primary">What’s your name?</h1>
         <p className="mt-2 text-sm text-muted">
-          Cam and mic stay off until you turn them on. The host has the remote.
+          Cam and mic stay off until you turn them on — they never block the room. The host has the remote.
         </p>
         <div className="mt-5">
           <Field label="Display name" htmlFor="gate-name">
