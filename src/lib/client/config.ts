@@ -9,11 +9,7 @@ export function isMockApi(): boolean {
   return process.env.NEXT_PUBLIC_USE_MOCK_API === "true";
 }
 
-/** Optional override. Empty means same-origin `/api` (this Next app). */
-export function getApiBase(): string {
-  return (process.env.NEXT_PUBLIC_API_URL ?? "").replace(/\/$/, "");
-}
-
+/** API.md base URL: `NEXT_PUBLIC_APP_URL` (local default http://localhost:3000). */
 export function getAppUrl(): string {
   if (process.env.NEXT_PUBLIC_APP_URL) {
     return process.env.NEXT_PUBLIC_APP_URL.replace(/\/$/, "");
@@ -22,6 +18,10 @@ export function getAppUrl(): string {
     return window.location.origin;
   }
   return "http://localhost:3000";
+}
+
+export function getApiBase(): string {
+  return getAppUrl();
 }
 
 export const LEGAL_COPY =

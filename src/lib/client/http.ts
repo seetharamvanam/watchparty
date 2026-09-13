@@ -79,7 +79,7 @@ export function createHttpApi(): WatchPartyApi {
       return request<AvTokenPayload>(`/api/rooms/${code}/av-token`, { method: "POST", token });
     },
     listChat(code, token) {
-      return request<{ messages: ChatMessagePublic[] }>(`/api/rooms/${code}/chat`, { token });
+      return request<{ messages: ChatMessagePublic[] }>(`/api/rooms/${code}/chat?limit=50`, { token });
     },
     sendChat(code, body, token) {
       return request<{ message: ChatMessagePublic }>(`/api/rooms/${code}/chat`, {
