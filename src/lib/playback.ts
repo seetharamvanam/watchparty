@@ -1,15 +1,11 @@
 import type { PlaybackRow } from "@/db/schema";
 import type { PlaybackState, PlaybackStatus } from "@/lib/types";
+import { estimatedPositionMs, playbackEventId } from "@/lib/sync-rules";
 
-export function estimatedPositionMs(playback: PlaybackRow, now = Date.now()): number {
-  if (playback.status !== "playing") {
-    return Math.max(0, playback.positionMs);
-  }
-  const elapsed = Math.max(0, now - playback.updatedAt.getTime());
-  return Math.max(0, Math.round(playback.positionMs + elapsed * playback.playbackRate));
-}
+export { estimatedPositionMs, playbackEventId } from "@/lib/sync-rules";
 
-export function serializePlayback(playback: PlaybackRow): PlaybackState {
+export function serializePlayback(playback: PlaybackRow, now = new Date()): PlaybackState {
+  const asOf = now.getTime();
   return {
     status: playback.status as PlaybackStatus,
     positionMs: playback.positionMs,
@@ -17,5 +13,8 @@ export function serializePlayback(playback: PlaybackRow): PlaybackState {
     mediaUrl: playback.mediaUrl,
     mediaType: (playback.mediaType as PlaybackState["mediaType"]) ?? null,
     updatedAt: playback.updatedAt.toISOString(),
+    serverNow: now.toISOString(),
+    estimatedPositionMs: estimatedPositionMs(playback, asOf),
+    eventId: playbackEventId(playback.updatedAt),
   };
 }

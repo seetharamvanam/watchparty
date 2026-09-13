@@ -1,5 +1,6 @@
 import Ably from "ably";
-import { ABLY_TOKEN_TTL_MS } from "./constants";
+import { ABLY_TOKEN_TTL_MS, SYNC_DRIFT_MS } from "./constants";
+import { playbackEventId } from "./sync-rules";
 import type { AblyEventName } from "./types";
 
 export type PublishedEvent = {
@@ -80,6 +81,7 @@ export function ablyPlaybackEvent(
   },
   actorParticipantId: string,
 ) {
+  const updatedAt = playback.updatedAt.toISOString();
   return {
     type,
     status: playback.status,
@@ -87,9 +89,10 @@ export function ablyPlaybackEvent(
     playbackRate: playback.playbackRate,
     mediaUrl: playback.mediaUrl,
     mediaType: playback.mediaType,
-    updatedAt: playback.updatedAt.toISOString(),
+    updatedAt,
+    eventId: playbackEventId(playback.updatedAt),
     serverNow: new Date().toISOString(),
-    driftCorrectionMs: 500,
+    driftCorrectionMs: SYNC_DRIFT_MS,
     actorParticipantId,
   };
 }

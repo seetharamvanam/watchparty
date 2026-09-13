@@ -1,4 +1,5 @@
 import { validateMediaUrl } from "@/lib/media";
+import { expectedPositionMs } from "@/lib/sync-rules";
 
 const YOUTUBE_ID = /^[a-zA-Z0-9_-]{11}$/;
 
@@ -55,8 +56,8 @@ export function estimatedPosition(playback: {
   status: string;
   playbackRate: number;
   updatedAt: string;
+  serverNow?: string;
+  estimatedPositionMs?: number;
 }): number {
-  if (playback.status !== "playing") return playback.positionMs;
-  const elapsed = Date.now() - new Date(playback.updatedAt).getTime();
-  return Math.max(0, playback.positionMs + elapsed * playback.playbackRate);
+  return expectedPositionMs(playback);
 }

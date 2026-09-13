@@ -1,3 +1,4 @@
+import { isStalePlaybackClock, playbackEventId } from "@/lib/sync-rules";
 import type { ChatMessagePublic, ParticipantPublic, PlaybackState, RoomPublic } from "@/lib/types";
 
 /** Subscribe-only connection. Clients never publish. */
@@ -26,6 +27,8 @@ export type RoomEvent = {
   mediaType?: PlaybackState["mediaType"];
   updatedAt?: string;
   serverNow?: string;
+  estimatedPositionMs?: number;
+  eventId?: string;
   driftCorrectionMs?: number;
 };
 
@@ -36,8 +39,10 @@ export function playbackFromEvent(event: RoomEvent, fallback: PlaybackState): Pl
     event.type === "pause" ||
     event.type === "seek" ||
     event.type === "rate" ||
-    event.type === "change_media"
+    event.type === "change_media" ||
+    event.type === "state_snapshot"
   ) {
+    const incremental = event.type !== "state_snapshot";
     return {
       status: (event.status as PlaybackState["status"]) ?? fallback.status,
       positionMs: event.positionMs ?? fallback.positionMs,
@@ -45,16 +50,26 @@ export function playbackFromEvent(event: RoomEvent, fallback: PlaybackState): Pl
       mediaUrl: event.mediaUrl !== undefined ? event.mediaUrl : fallback.mediaUrl,
       mediaType: event.mediaType !== undefined ? event.mediaType : fallback.mediaType,
       updatedAt: event.updatedAt ?? fallback.updatedAt,
+      serverNow: event.serverNow,
+      // Snapshot-only live estimate. Incremental events keep the mutation anchor
+      // so we do not keep a stale estimatedPositionMs from the last join snapshot.
+      estimatedPositionMs: incremental ? undefined : event.estimatedPositionMs,
+      eventId: event.eventId ?? (event.updatedAt ? playbackEventId(event.updatedAt) : fallback.eventId),
     };
   }
   return fallback;
 }
 
-/** Ignore realtime playback that is older than the HTTP snapshot we already applied. */
+/**
+ * Ignore realtime playback older than the HTTP snapshot (or a newer mutation)
+ * already applied. Events without `eventId`/`updatedAt` are treated as spoof.
+ */
 export function isStalePlaybackEvent(event: RoomEvent, current: PlaybackState): boolean {
-  const incoming = event.playback?.updatedAt ?? event.updatedAt;
-  if (!incoming) return false;
-  const next = Date.parse(incoming);
-  const prev = Date.parse(current.updatedAt);
-  return Number.isFinite(next) && Number.isFinite(prev) && next < prev;
+  return isStalePlaybackClock(
+    {
+      eventId: event.playback?.eventId ?? event.eventId,
+      updatedAt: event.playback?.updatedAt ?? event.updatedAt,
+    },
+    current,
+  );
 }

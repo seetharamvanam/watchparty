@@ -4,7 +4,8 @@ import { useEffect, useRef } from "react";
 import { ApiError } from "@/lib/client/errors";
 import { estimatedPosition, youtubeIdFromUrl } from "@/lib/client/parse-media";
 import { loadYouTubeApi } from "@/lib/client/youtube";
-import { DRIFT_CORRECTION_MS } from "@/lib/constants";
+import { SYNC_DRIFT_MS } from "@/lib/constants";
+import { shouldCorrectDrift } from "@/lib/sync-rules";
 import { applyYoutube } from "@/components/room/player-sync";
 import type { YouTubeStageProps } from "@/components/room/player-types";
 
@@ -80,7 +81,7 @@ export function YouTubeStage({
       onDuration((player.getDuration() ?? 0) * 1000);
       if (isHost) return;
       const expected = estimatedPosition(playback);
-      if (Math.abs(local - expected) > DRIFT_CORRECTION_MS) {
+      if (shouldCorrectDrift(local, expected, SYNC_DRIFT_MS)) {
         applyingRef.current = true;
         player.seekTo(expected / 1000, true);
         window.setTimeout(() => {

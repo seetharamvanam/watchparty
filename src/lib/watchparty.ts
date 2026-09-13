@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, lt, sql } from "drizzle-orm";
 import { z } from "zod";
-import { getDb } from "@/db";
+import { getDb, type AppDb } from "@/db";
 import { chatMessages, participants, playbackStates, rooms, type ParticipantRow, type PlaybackRow, type RoomRow } from "@/db/schema";
 import { ablyPlaybackEvent, createAblyTokenRequest, publishRoomEvent } from "./ably";
 import { generateRoomCode, isRoomCodeFormat, normalizeRoomCode } from "./codes";
@@ -14,6 +14,7 @@ import {
   MAX_PLAYBACK_RATE,
   MAX_POSITION_MS,
   MIN_PLAYBACK_RATE,
+  PRESENCE_STALE_MS,
   REACTION_MAX,
   REACTION_RATE_LIMIT_MAX,
   REACTION_RATE_LIMIT_WINDOW_MS,
@@ -87,6 +88,8 @@ type RoomContext = {
   playback: PlaybackRow;
   active: ParticipantRow[];
 };
+
+type DbTx = Parameters<Parameters<AppDb["transaction"]>[0]>[0];
 
 function nowPlusTtl(from = new Date()): Date {
   return new Date(from.getTime() + ROOM_TTL_MS);
@@ -180,6 +183,132 @@ function requireHost(participant: ParticipantRow) {
   }
 }
 
+function roomStateSnapshot(ctx: RoomContext, now = new Date()) {
+  return {
+    type: "state_snapshot" as const,
+    room: serializeRoom(ctx.room, ctx.active.length),
+    participants: ctx.active.map(serializeParticipant),
+    playback: serializePlayback(ctx.playback, now),
+    serverNow: now.toISOString(),
+  };
+}
+
+/**
+ * Soft disconnect + host handoff. Marks silent participants left, then ensures
+ * exactly one active host (oldest remaining). No kick/mute/lock controls.
+ */
+async function settlePresence(
+  tx: DbTx,
+  roomId: string,
+  now: Date,
+): Promise<{ departed: ParticipantRow[]; newHost: ParticipantRow | null }> {
+  const staleBefore = new Date(now.getTime() - PRESENCE_STALE_MS);
+  const stale = await tx
+    .select()
+    .from(participants)
+    .where(
+      and(eq(participants.roomId, roomId), isNull(participants.leftAt), lt(participants.lastSeenAt, staleBefore)),
+    );
+
+  const departed: ParticipantRow[] = [];
+  for (const row of stale) {
+    await tx
+      .update(participants)
+      .set({ leftAt: now, isHost: false, lastSeenAt: row.lastSeenAt })
+      .where(eq(participants.id, row.id));
+    departed.push(row);
+  }
+
+  const active = await tx
+    .select()
+    .from(participants)
+    .where(and(eq(participants.roomId, roomId), isNull(participants.leftAt)))
+    .orderBy(asc(participants.joinedAt));
+
+  if (active.length === 0) {
+    return { departed, newHost: null };
+  }
+
+  const intended = active[0];
+  const extras = active.filter((row) => row.isHost && row.id !== intended.id);
+  if (intended.isHost && extras.length === 0) {
+    return { departed, newHost: null };
+  }
+
+  await tx.update(participants).set({ isHost: false }).where(eq(participants.roomId, roomId));
+  await tx.update(participants).set({ isHost: true }).where(eq(participants.id, intended.id));
+  return { departed, newHost: { ...intended, isHost: true } };
+}
+
+async function publishPresenceHandoff(
+  code: string,
+  departed: ParticipantRow[],
+  newHost: ParticipantRow | null,
+) {
+  for (const row of departed) {
+    await publishRoomEvent(code, "participant_left", {
+      type: "participant_left",
+      participantId: row.id,
+      displayName: row.displayName,
+    });
+  }
+  if (newHost) {
+    await publishRoomEvent(code, "host_changed", {
+      type: "host_changed",
+      host: serializeParticipant(newHost),
+    });
+    await publishRoomEvent(code, "state_snapshot", roomStateSnapshot(await loadContext(code)));
+  }
+}
+
+/**
+ * Serialize host playback/media writes against the room row so leave+transfer
+ * cannot overlap a mutation (at most one host can command).
+ */
+async function mutateAsHost<T>(
+  req: Request,
+  code: string,
+  fn: (ctx: { tx: DbTx; room: RoomRow; participant: ParticipantRow; playback: PlaybackRow }) => Promise<T>,
+): Promise<T> {
+  const token = readBearerToken(req);
+  if (!token) {
+    throw unauthorized();
+  }
+  const normalized = normalizeRoomCode(code);
+  if (!isRoomCodeFormat(normalized)) {
+    throw roomNotFound();
+  }
+
+  const db = getDb();
+  return db.transaction(async (tx) => {
+    const [room] = await tx.select().from(rooms).where(eq(rooms.code, normalized)).for("update");
+    if (!room) {
+      throw roomNotFound();
+    }
+    assertNotExpired(room);
+
+    const [participant] = await tx
+      .select()
+      .from(participants)
+      .where(eq(participants.sessionTokenHash, hashSessionToken(token)))
+      .limit(1);
+    if (!participant || participant.leftAt) {
+      throw unauthorized();
+    }
+    if (participant.roomId !== room.id) {
+      throw forbidden("Session does not belong to this room");
+    }
+    requireHost(participant);
+
+    const [playback] = await tx.select().from(playbackStates).where(eq(playbackStates.roomId, room.id)).limit(1);
+    if (!playback) {
+      throw roomNotFound("Playback state missing for room");
+    }
+
+    return fn({ tx, room, participant, playback });
+  });
+}
+
 async function touchPresence(roomId: string, participantId?: string) {
   const db = getDb();
   const now = new Date();
@@ -266,7 +395,7 @@ export async function createRoom(input: unknown): Promise<SessionPayload> {
       mediaUrl,
       mediaType,
       updatedAt: now,
-    }),
+    }, now),
     serverNow: now.toISOString(),
   });
 
@@ -297,6 +426,8 @@ export async function joinRoom(input: unknown): Promise<JoinPayload> {
       throw roomExpired();
     }
 
+    const settled = await settlePresence(tx, room.id, now);
+
     const [countRow] = await tx
       .select({ count: sql<number>`cast(count(*) as int)` })
       .from(participants)
@@ -317,7 +448,7 @@ export async function joinRoom(input: unknown): Promise<JoinPayload> {
     });
     await tx.update(rooms).set({ lastPresenceAt: now, expiresAt: nowPlusTtl(now) }).where(eq(rooms.id, room.id));
 
-    return room;
+    return { room, settled };
   });
 
   const [participant] = await db.select().from(participants).where(eq(participants.id, participantId)).limit(1);
@@ -325,25 +456,22 @@ export async function joinRoom(input: unknown): Promise<JoinPayload> {
     throw new Error("Failed to join room");
   }
 
-  const ctx = await loadContext(joined.code);
-  const publicParticipants = ctx.active.map(serializeParticipant);
+  await publishPresenceHandoff(joined.room.code, joined.settled.departed, joined.settled.newHost);
 
-  await publishRoomEvent(joined.code, "participant_joined", {
+  const ctx = await loadContext(joined.room.code);
+  const publicParticipants = ctx.active.map(serializeParticipant);
+  const me = publicParticipants.find((row) => row.id === participant.id) ?? serializeParticipant(participant);
+
+  await publishRoomEvent(joined.room.code, "participant_joined", {
     type: "participant_joined",
-    participant: serializeParticipant(participant),
+    participant: me,
     participantCount: ctx.active.length,
   });
-  await publishRoomEvent(joined.code, "state_snapshot", {
-    type: "state_snapshot",
-    room: serializeRoom(ctx.room, ctx.active.length),
-    participants: publicParticipants,
-    playback: serializePlayback(ctx.playback),
-    serverNow: new Date().toISOString(),
-  });
+  await publishRoomEvent(joined.room.code, "state_snapshot", roomStateSnapshot(ctx));
 
   return {
     room: serializeRoom(ctx.room, ctx.active.length),
-    participant: serializeParticipant(participant),
+    participant: me,
     sessionToken,
     playback: serializePlayback(ctx.playback),
     participants: publicParticipants,
@@ -369,10 +497,10 @@ export async function getRoomView(req: Request, code: string): Promise<RoomView>
 }
 
 async function updatePlayback(
+  db: AppDb | DbTx,
   roomId: string,
   patch: Partial<PlaybackRow> & { updatedAt: Date },
 ): Promise<PlaybackRow> {
-  const db = getDb();
   const [row] = await db.update(playbackStates).set(patch).where(eq(playbackStates.roomId, roomId)).returning();
   if (!row) {
     throw roomNotFound("Playback state missing for room");
@@ -382,17 +510,18 @@ async function updatePlayback(
 
 export async function setRoomMedia(req: Request, code: string, input: unknown) {
   const body = mediaSchema.parse(input);
-  const { participant, room } = await requireSession(req, code);
-  requireHost(participant);
   const validated = validateMediaUrl(body.mediaUrl);
   const now = new Date();
 
-  const playback = await updatePlayback(room.id, {
-    mediaUrl: validated.mediaUrl,
-    mediaType: validated.mediaType,
-    status: "paused",
-    positionMs: 0,
-    updatedAt: now,
+  const { room, participant, playback } = await mutateAsHost(req, code, async ({ tx, room, participant }) => {
+    const playback = await updatePlayback(tx, room.id, {
+      mediaUrl: validated.mediaUrl,
+      mediaType: validated.mediaType,
+      status: "paused",
+      positionMs: 0,
+      updatedAt: now,
+    });
+    return { room, participant, playback };
   });
 
   await publishRoomEvent(room.code, "change_media", ablyPlaybackEvent("change_media", playback, participant.id));
@@ -401,56 +530,52 @@ export async function setRoomMedia(req: Request, code: string, input: unknown) {
 
 export async function controlPlayback(req: Request, code: string, input: unknown) {
   const body = playbackSchema.parse(input);
-  const { participant, room } = await requireSession(req, code);
-  requireHost(participant);
-
-  const db = getDb();
-  const [current] = await db.select().from(playbackStates).where(eq(playbackStates.roomId, room.id)).limit(1);
-  if (!current) {
-    throw roomNotFound("Playback state missing for room");
-  }
-
-  const now = new Date();
   const action = body.action as PlaybackAction;
-  const patch: Partial<PlaybackRow> & { updatedAt: Date } = { updatedAt: now };
 
-  switch (action) {
-    case "play":
-      patch.status = "playing";
-      patch.positionMs = body.positionMs ?? current.positionMs;
-      break;
-    case "pause":
-      patch.status = "paused";
-      patch.positionMs = body.positionMs ?? current.positionMs;
-      break;
-    case "seek":
-      if (body.positionMs === undefined) {
-        throw validationError("positionMs is required for seek");
+  const { room, participant, playback } = await mutateAsHost(req, code, async ({ tx, room, participant, playback: current }) => {
+    const now = new Date();
+    const patch: Partial<PlaybackRow> & { updatedAt: Date } = { updatedAt: now };
+
+    switch (action) {
+      case "play":
+        patch.status = "playing";
+        patch.positionMs = body.positionMs ?? current.positionMs;
+        break;
+      case "pause":
+        patch.status = "paused";
+        patch.positionMs = body.positionMs ?? current.positionMs;
+        break;
+      case "seek":
+        if (body.positionMs === undefined) {
+          throw validationError("positionMs is required for seek");
+        }
+        patch.positionMs = body.positionMs;
+        break;
+      case "rate":
+        if (body.playbackRate === undefined) {
+          throw validationError("playbackRate is required for rate");
+        }
+        patch.playbackRate = body.playbackRate;
+        break;
+      case "change_media": {
+        if (!body.mediaUrl) {
+          throw validationError("mediaUrl is required for change_media");
+        }
+        const validated = validateMediaUrl(body.mediaUrl);
+        patch.mediaUrl = validated.mediaUrl;
+        patch.mediaType = validated.mediaType;
+        patch.status = "paused";
+        patch.positionMs = body.positionMs ?? 0;
+        break;
       }
-      patch.positionMs = body.positionMs;
-      break;
-    case "rate":
-      if (body.playbackRate === undefined) {
-        throw validationError("playbackRate is required for rate");
-      }
-      patch.playbackRate = body.playbackRate;
-      break;
-    case "change_media": {
-      if (!body.mediaUrl) {
-        throw validationError("mediaUrl is required for change_media");
-      }
-      const validated = validateMediaUrl(body.mediaUrl);
-      patch.mediaUrl = validated.mediaUrl;
-      patch.mediaType = validated.mediaType;
-      patch.status = "paused";
-      patch.positionMs = body.positionMs ?? 0;
-      break;
+      default:
+        throw validationError("Unsupported playback action");
     }
-    default:
-      throw validationError("Unsupported playback action");
-  }
 
-  const playback = await updatePlayback(room.id, patch);
+    const playback = await updatePlayback(tx, room.id, patch);
+    return { room, participant, playback };
+  });
+
   const eventName = action === "change_media" ? "change_media" : action;
   await publishRoomEvent(room.code, eventName, ablyPlaybackEvent(eventName, playback, participant.id));
 
@@ -545,54 +670,108 @@ export async function postReaction(req: Request, code: string, input: unknown) {
 }
 
 export async function heartbeat(req: Request, code: string) {
-  const { participant, room } = await requireSession(req, code);
-  await touchPresence(room.id, participant.id);
-  const ctx = await loadContext(room.code);
+  const token = readBearerToken(req);
+  if (!token) {
+    throw unauthorized();
+  }
+  const normalized = normalizeRoomCode(code);
+  if (!isRoomCodeFormat(normalized)) {
+    throw roomNotFound();
+  }
+
+  const db = getDb();
+  const now = new Date();
+  const result = await db.transaction(async (tx) => {
+    const [room] = await tx.select().from(rooms).where(eq(rooms.code, normalized)).for("update");
+    if (!room) {
+      throw roomNotFound();
+    }
+    assertNotExpired(room);
+
+    const [participant] = await tx
+      .select()
+      .from(participants)
+      .where(eq(participants.sessionTokenHash, hashSessionToken(token)))
+      .limit(1);
+    if (!participant || participant.leftAt) {
+      throw unauthorized();
+    }
+    if (participant.roomId !== room.id) {
+      throw forbidden("Session does not belong to this room");
+    }
+
+    await tx
+      .update(rooms)
+      .set({ lastPresenceAt: now, expiresAt: nowPlusTtl(now) })
+      .where(eq(rooms.id, room.id));
+    await tx.update(participants).set({ lastSeenAt: now }).where(eq(participants.id, participant.id));
+
+    const settled = await settlePresence(tx, room.id, now);
+    const [fresh] = await tx.select().from(participants).where(eq(participants.id, participant.id)).limit(1);
+    return { room, participant: fresh ?? participant, settled };
+  });
+
+  await publishPresenceHandoff(result.room.code, result.settled.departed, result.settled.newHost);
+  const ctx = await loadContext(result.room.code);
   return {
     room: serializeRoom(ctx.room, ctx.active.length),
-    participant: serializeParticipant(participant),
+    participant: serializeParticipant(result.participant),
     expiresAt: ctx.room.expiresAt.toISOString(),
   };
 }
 
 export async function leaveRoom(req: Request, code: string) {
-  const { participant, room } = await requireSession(req, code);
+  const token = readBearerToken(req);
+  if (!token) {
+    throw unauthorized();
+  }
+  const normalized = normalizeRoomCode(code);
+  if (!isRoomCodeFormat(normalized)) {
+    throw roomNotFound();
+  }
+
   const db = getDb();
   const now = new Date();
-  let newHost: ParticipantRow | null = null;
 
-  await db.transaction(async (tx) => {
+  const { left, departed, newHost, roomCode } = await db.transaction(async (tx) => {
+    const [room] = await tx.select().from(rooms).where(eq(rooms.code, normalized)).for("update");
+    if (!room) {
+      throw roomNotFound();
+    }
+    assertNotExpired(room);
+
+    const [participant] = await tx
+      .select()
+      .from(participants)
+      .where(eq(participants.sessionTokenHash, hashSessionToken(token)))
+      .for("update");
+    if (!participant || participant.leftAt) {
+      throw unauthorized();
+    }
+    if (participant.roomId !== room.id) {
+      throw forbidden("Session does not belong to this room");
+    }
+
     await tx
       .update(participants)
       .set({ leftAt: now, isHost: false, lastSeenAt: now })
       .where(eq(participants.id, participant.id));
 
-    if (participant.isHost) {
-      const [nextHost] = await tx
-        .select()
-        .from(participants)
-        .where(and(eq(participants.roomId, room.id), isNull(participants.leftAt)))
-        .orderBy(asc(participants.joinedAt))
-        .limit(1);
-      if (nextHost) {
-        await tx.update(participants).set({ isHost: true }).where(eq(participants.id, nextHost.id));
-        newHost = { ...nextHost, isHost: true };
-      }
-    }
+    const settled = await settlePresence(tx, room.id, now);
+    return {
+      left: participant,
+      departed: settled.departed,
+      newHost: settled.newHost,
+      roomCode: room.code,
+    };
   });
 
-  await publishRoomEvent(room.code, "participant_left", {
+  await publishRoomEvent(roomCode, "participant_left", {
     type: "participant_left",
-    participantId: participant.id,
-    displayName: participant.displayName,
+    participantId: left.id,
+    displayName: left.displayName,
   });
-
-  if (newHost) {
-    await publishRoomEvent(room.code, "host_changed", {
-      type: "host_changed",
-      host: serializeParticipant(newHost),
-    });
-  }
+  await publishPresenceHandoff(roomCode, departed, newHost);
 
   return {
     ok: true,

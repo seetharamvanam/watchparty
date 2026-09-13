@@ -2,7 +2,8 @@
 
 import { useEffect } from "react";
 import { estimatedPosition, isHlsUrl } from "@/lib/client/parse-media";
-import { DRIFT_CORRECTION_MS } from "@/lib/constants";
+import { SYNC_DRIFT_MS } from "@/lib/constants";
+import { shouldCorrectDrift } from "@/lib/sync-rules";
 import { applyHtml5 } from "@/components/room/player-sync";
 import type { Html5StageProps } from "@/components/room/player-types";
 
@@ -62,7 +63,7 @@ export function Html5Stage({
       if (video.duration && Number.isFinite(video.duration)) onDuration(video.duration * 1000);
       if (isHost) return;
       const expected = estimatedPosition(playback);
-      if (Math.abs(local - expected) > DRIFT_CORRECTION_MS) {
+      if (shouldCorrectDrift(local, expected, SYNC_DRIFT_MS)) {
         applyingRef.current = true;
         video.currentTime = expected / 1000;
         window.setTimeout(() => {

@@ -10,7 +10,7 @@ import type { AvTokenPayload, ChatMessagePublic, JoinPayload, PlaybackState, Roo
 
 async function request<T>(
   path: string,
-  options: { method?: string; body?: unknown; token?: string } = {},
+  options: { method?: string; body?: unknown; token?: string; keepalive?: boolean } = {},
 ): Promise<T> {
   const base = getApiBase();
   const headers: Record<string, string> = { Accept: "application/json" };
@@ -23,6 +23,7 @@ async function request<T>(
       method: options.method ?? "GET",
       headers,
       body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+      keepalive: options.keepalive,
     });
   } catch {
     throw new ApiError("CONNECTION_LOST", "Could not reach the Watch Party API.", 503);
@@ -103,7 +104,7 @@ export function createHttpApi(): WatchPartyApi {
     leave(code, token) {
       return request<{ ok: true; hostTransferred: boolean; newHost: ParticipantPublic | null }>(
         `/api/rooms/${code}/leave`,
-        { method: "POST", token },
+        { method: "POST", token, keepalive: true },
       );
     },
   };

@@ -12,7 +12,10 @@ export const MIN_PLAYBACK_RATE = 0.25;
 export const MAX_PLAYBACK_RATE = 2;
 export const MAX_POSITION_MS = 24 * 60 * 60 * 1000;
 
-export const DRIFT_CORRECTION_MS = 500;
+export { DRIFT_CORRECTION_MS, SYNC_DRIFT_MS } from "./sync-rules";
+
+/** Missed heartbeats after which a participant is treated as disconnected. */
+export const PRESENCE_STALE_MS = 120_000;
 
 export const LIVEKIT_TOKEN_TTL_SECONDS = 15 * 60;
 export const ABLY_TOKEN_TTL_MS = 15 * 60 * 1000;
