@@ -21,7 +21,7 @@ The full HTTP contract is in [`API.md`](./API.md).
 | Concern | Choice |
 | --- | --- |
 | App | Next.js App Router + TypeScript |
-| Realtime sync / chat events | [Ably](https://ably.com) channel `room:{code}` |
+| Realtime sync / chat events | [Ably](https://ably.com) channel `room:{code}` — clients subscribe-only; server publishes |
 | Camera + microphone | [LiveKit Cloud](https://livekit.io) (server-minted short-lived tokens) |
 | Database | Neon Postgres + [Drizzle ORM](https://orm.drizzle.team) |
 | Auth | `Authorization: Bearer <sessionToken>` issued on create/join |
@@ -73,9 +73,9 @@ Exact names (also listed in `.env.example`):
 | `POST` | `/api/rooms/:code/media` | Host sets `mediaUrl` |
 | `POST` | `/api/rooms/:code/playback` | Host `play\|pause\|seek\|rate\|change_media` |
 | `GET` | `/api/rooms/:code/playback` | Current playback |
-| `POST` | `/api/realtime/token` | Ably token for `room:{code}` |
+| `POST` | `/api/realtime/token` | Ably token for `room:{code}` (subscribe + presence + history; no publish) |
 | `POST` | `/api/rooms/:code/av-token` | LiveKit token `{ token, url, roomName, identity, expiresAt }` |
-| `POST` / `GET` | `/api/rooms/:code/chat` | Persisted chat, rate limited |
+| `POST` / `GET` | `/api/rooms/:code/chat` | Persisted chat; Neon sliding-window rate limit |
 | `POST` | `/api/rooms/:code/reactions` | Ephemeral Ably only |
 | `POST` | `/api/rooms/:code/presence` | Heartbeat; extends 24h expiry |
 | `POST` | `/api/rooms/:code/leave` | Leave; host transfers to oldest active |

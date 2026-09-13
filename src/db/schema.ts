@@ -41,6 +41,20 @@ export const playbackStates = pgTable("playback_states", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+export const rateLimitBuckets = pgTable("rate_limit_buckets", {
+  bucketKey: text("bucket_key").primaryKey(),
+});
+
+export const rateLimitEvents = pgTable(
+  "rate_limit_events",
+  {
+    id: uuid("id").primaryKey(),
+    bucketKey: text("bucket_key").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("rate_limit_events_key_created_idx").on(table.bucketKey, table.createdAt)],
+);
+
 export const chatMessages = pgTable(
   "chat_messages",
   {

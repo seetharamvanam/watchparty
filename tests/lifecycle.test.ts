@@ -51,6 +51,26 @@ describe("room lifecycle", () => {
     expect(extra.body.error.code).toBe("ROOM_FULL");
   });
 
+  it("serializes concurrent joins so the room never exceeds 8", async () => {
+    const { body: created } = await createHost();
+    const code = created.room.code as string;
+    for (let i = 0; i < 6; i += 1) {
+      const joined = await joinGuest(code, `Seat ${i}`);
+      expect(joined.res.status).toBe(200);
+    }
+
+    const raced = await Promise.all([
+      joinGuest(code, "Race A"),
+      joinGuest(code, "Race B"),
+      joinGuest(code, "Race C"),
+    ]);
+    const accepted = raced.filter((result) => result.res.status === 200);
+    const rejected = raced.filter((result) => result.body?.error?.code === "ROOM_FULL");
+    expect(accepted.length).toBe(1);
+    expect(rejected.length).toBe(2);
+    expect(accepted[0]?.body.room.participantCount).toBe(8);
+  });
+
   it("returns ROOM_EXPIRED after the room expiry timestamp", async () => {
     const { body: created } = await createHost();
     await expireRoom(created.room.code);

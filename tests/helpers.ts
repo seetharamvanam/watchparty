@@ -2,7 +2,6 @@ import { eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { rooms } from "@/db/schema";
 import { resetPublishedEvents } from "@/lib/ably";
-import { resetRateLimits } from "@/lib/rate-limit";
 import { POST as createRoomHandler } from "@/app/api/rooms/route";
 import { POST as joinRoomHandler } from "@/app/api/rooms/join/route";
 import { createTestDb } from "./db";
@@ -24,7 +23,6 @@ export function params(code: string) {
 }
 
 export async function resetTestState() {
-  resetRateLimits();
   resetPublishedEvents();
   return createTestDb();
 }

@@ -17,7 +17,7 @@ Tokens are hashed at rest with `SESSION_SECRET`. They are not user accounts.
 ## Room rules
 
 - Join by a 6-character room code (alphabet `A–Z` excluding `I`/`O`, and `2–9`).
-- Maximum **8** participants per room.
+- Maximum **8** participants per room. Join serializes on the room row (`SELECT … FOR UPDATE`) so concurrent joins cannot exceed the cap.
 - A room expires **24 hours after the last presence** (create, join, or `POST /presence`).
 - Host can set media and control playback. Leaving transfers host to the oldest active participant.
 
@@ -225,14 +225,16 @@ Response `200`: `{ "playback": {} }`
 
 Requires session. Body: `{ "code": "ABC234" }`.
 
-Returns an Ably token request scoped to channel `room:{code}`:
+Returns an Ably token request scoped to channel `room:{code}`.
+
+**Clients are subscribe-only.** Capability is `subscribe`, `presence`, and `history`. Tokens **never** include `publish`. Guests cannot spoof playback, host, chat, or reactions on the channel. The server publishes every authoritative event with `ABLY_API_KEY`.
 
 ```json
 {
   "tokenRequest": {
     "keyName": "...",
     "ttl": 900000,
-    "capability": "...",
+    "capability": "{\"room:ABC234\":[\"subscribe\",\"presence\",\"history\"]}",
     "clientId": "<participantId>",
     "timestamp": 0,
     "nonce": "...",
@@ -270,7 +272,9 @@ Response `200`:
 
 Response `201`: `{ "message": { "id", "participantId", "displayName", "body", "createdAt" } }`
 
-Limit: **5 messages / 10 seconds / participant**. Excess → `RATE_LIMITED`.
+Bodies are sanitized: HTML tags and `<>` are stripped, control / zero-width characters are removed, then empty or oversized results are rejected (`VALIDATION_ERROR`).
+
+Limit: **5 messages / 10 seconds / participant**. Excess → `RATE_LIMITED`. Limits are stored in Neon (`rate_limit_events` + locked `rate_limit_buckets` rows) so they work across serverless isolates.
 
 `GET /api/rooms/:code/chat` — session required. Optional `?limit=50` (1–100). Returns `{ "messages": [] }` oldest-first.
 
@@ -282,9 +286,11 @@ Limit: **5 messages / 10 seconds / participant**. Excess → `RATE_LIMITED`.
 { "emoji": "🔥" }
 ```
 
-Not persisted. Publishes `reaction` on `room:{code}`. Response `{ "ok": true, "reaction": { ... } }`.
+Not persisted. The **server** publishes `reaction` on `room:{code}` (clients cannot publish). Response `{ "ok": true, "reaction": { ... } }`.
 
-Limit: **20 reactions / 10 seconds / participant**.
+Emoji/text is sanitized the same way as chat (no HTML, no control chars). Empty-after-sanitize → `VALIDATION_ERROR`.
+
+Limit: **20 reactions / 10 seconds / participant** (same durable DB limiter).
 
 ### Presence heartbeat
 
@@ -312,7 +318,7 @@ Response:
 
 ## Ably channel `room:{code}`
 
-Clients should subscribe with the token from `POST /api/realtime/token`.
+Clients subscribe (and may use presence/history) with the token from `POST /api/realtime/token`. They **must not** and **cannot** publish. The API server publishes all of the following events with the Ably REST API key:
 
 | Event | When |
 | --- | --- |

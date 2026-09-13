@@ -33,6 +33,7 @@ import { mintAvToken } from "./livekit";
 import { validateMediaUrl } from "./media";
 import { serializePlayback } from "./playback";
 import { checkRateLimit } from "./rate-limit";
+import { sanitizeChatBody, sanitizeReaction } from "./sanitize";
 import { serializeChatMessage, serializeParticipant, serializeRoom } from "./serialize";
 import { createSessionToken, hashSessionToken, readBearerToken } from "./session";
 import type {
@@ -70,11 +71,11 @@ const playbackSchema = z.object({
 });
 
 const chatSchema = z.object({
-  body: z.string().trim().min(1, "body is required").max(CHAT_BODY_MAX),
+  body: z.string().min(1, "body is required").max(CHAT_BODY_MAX + 256),
 });
 
 const reactionSchema = z.object({
-  emoji: z.string().trim().min(1, "emoji is required").max(REACTION_MAX),
+  emoji: z.string().min(1, "emoji is required").max(REACTION_MAX + 64),
 });
 
 const realtimeTokenSchema = z.object({
@@ -285,7 +286,10 @@ export async function joinRoom(input: unknown): Promise<JoinPayload> {
   const now = new Date();
 
   const joined = await db.transaction(async (tx) => {
-    const [room] = await tx.select().from(rooms).where(eq(rooms.code, code)).limit(1);
+    // Serialize joins on the room row so two concurrent requests cannot both
+    // see count < 8 and insert a 9th participant. The FOR UPDATE lock is held
+    // until this transaction commits.
+    const [room] = await tx.select().from(rooms).where(eq(rooms.code, code)).for("update");
     if (!room) {
       throw roomNotFound();
     }
@@ -459,10 +463,11 @@ export async function getPlayback(code: string) {
 }
 
 export async function postChat(req: Request, code: string, input: unknown) {
-  const body = chatSchema.parse(input);
+  const parsed = chatSchema.parse(input);
+  const text = sanitizeChatBody(parsed.body);
   const { participant, room } = await requireSession(req, code);
 
-  const allowed = checkRateLimit(
+  const allowed = await checkRateLimit(
     `chat:${participant.id}`,
     CHAT_RATE_LIMIT_MAX,
     CHAT_RATE_LIMIT_WINDOW_MS,
@@ -477,7 +482,7 @@ export async function postChat(req: Request, code: string, input: unknown) {
     id: randomUUID(),
     roomId: room.id,
     participantId: participant.id,
-    body: body.body,
+    body: text,
     createdAt: now,
   };
   await db.insert(chatMessages).values(message);
@@ -515,10 +520,11 @@ export async function listChat(req: Request, code: string, limit = 50) {
 }
 
 export async function postReaction(req: Request, code: string, input: unknown) {
-  const body = reactionSchema.parse(input);
+  const parsed = reactionSchema.parse(input);
+  const emoji = sanitizeReaction(parsed.emoji);
   const { participant, room } = await requireSession(req, code);
 
-  const allowed = checkRateLimit(
+  const allowed = await checkRateLimit(
     `reaction:${participant.id}`,
     REACTION_RATE_LIMIT_MAX,
     REACTION_RATE_LIMIT_WINDOW_MS,
@@ -529,7 +535,7 @@ export async function postReaction(req: Request, code: string, input: unknown) {
 
   const event = {
     type: "reaction" as const,
-    emoji: body.emoji,
+    emoji,
     participantId: participant.id,
     displayName: participant.displayName,
     createdAt: new Date().toISOString(),

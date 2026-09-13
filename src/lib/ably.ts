@@ -30,6 +30,9 @@ function getAblyRest(): Ably.Rest {
   return new Ably.Rest({ key });
 }
 
+/** Client tokens are subscribe-only. Server publishes with ABLY_API_KEY. */
+export const CLIENT_ABLY_CAPABILITIES = ["subscribe", "presence", "history"] as const;
+
 export async function createAblyTokenRequest(clientId: string, code: string) {
   const rest = getAblyRest();
   const channel = roomChannel(code);
@@ -37,7 +40,7 @@ export async function createAblyTokenRequest(clientId: string, code: string) {
     clientId,
     ttl: ABLY_TOKEN_TTL_MS,
     capability: {
-      [channel]: ["subscribe", "publish", "presence", "history"],
+      [channel]: [...CLIENT_ABLY_CAPABILITIES],
     },
   });
 
