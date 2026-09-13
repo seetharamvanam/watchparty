@@ -1,14 +1,26 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type FormEvent, type MutableRefObject } from "react";
+import dynamic from "next/dynamic";
+import { useCallback, useRef, useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Field, TextInput } from "@/components/ui/field";
-import { ApiError, errorMessage, isApiError } from "@/lib/client/errors";
-import { estimatedPosition, formatClock, isHlsUrl, youtubeIdFromUrl } from "@/lib/client/parse-media";
-import { DRIFT_CORRECTION_MS } from "@/lib/constants";
+import { errorMessage, isApiError } from "@/lib/client/errors";
+import { estimatedPosition, formatClock } from "@/lib/client/parse-media";
 import { useRoom } from "@/lib/client/room-context";
-import { loadYouTubeApi, type YTPlayer } from "@/lib/client/youtube";
+import type { YTPlayer } from "@/lib/client/youtube";
 import type { PlaybackState } from "@/lib/types";
+
+const StageFallback = () => <div className="absolute inset-0 animate-pulse bg-black" aria-hidden />;
+
+const YouTubeStage = dynamic(() => import("@/components/room/youtube-stage"), {
+  ssr: false,
+  loading: StageFallback,
+});
+
+const Html5Stage = dynamic(() => import("@/components/room/html5-stage"), {
+  ssr: false,
+  loading: StageFallback,
+});
 
 export function SyncedPlayer() {
   const { playback, isHost, controlPlayback, setMedia } = useRoom();
@@ -255,240 +267,4 @@ function HostControls({
   );
 }
 
-function signature(playback: PlaybackState): string {
-  return `${playback.mediaUrl}|${playback.status}|${Math.round(playback.positionMs / 250)}|${playback.playbackRate}|${playback.updatedAt}`;
-}
-
-function YouTubeStage({
-  playback,
-  isHost,
-  applyingRef,
-  lastAppliedRef,
-  playerRef,
-  onHostAction,
-  onDuration,
-  onPosition,
-  onError,
-}: {
-  playback: PlaybackState;
-  isHost: boolean;
-  applyingRef: MutableRefObject<boolean>;
-  lastAppliedRef: MutableRefObject<string>;
-  playerRef: MutableRefObject<YTPlayer | null>;
-  onHostAction: (action: "play" | "pause" | "seek" | "rate", positionMs: number, rate?: number) => void;
-  onDuration: (ms: number) => void;
-  onPosition: (ms: number) => void;
-  onError: (message: string | null) => void;
-}) {
-  const mountRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    const videoId = playback.mediaUrl ? youtubeIdFromUrl(playback.mediaUrl) : null;
-    if (!videoId || !mountRef.current) return;
-    let cancelled = false;
-    loadYouTubeApi()
-      .then((YT) => {
-        if (cancelled || !mountRef.current) return;
-        playerRef.current?.destroy();
-        playerRef.current = new YT.Player(mountRef.current, {
-          videoId,
-          width: "100%",
-          height: "100%",
-          playerVars: { controls: 0, rel: 0, modestbranding: 1, playsinline: 1, origin: window.location.origin },
-          events: {
-            onReady: () => {
-              lastAppliedRef.current = "";
-              applyYoutube(playerRef.current, playback, applyingRef, lastAppliedRef);
-              onDuration((playerRef.current?.getDuration() ?? 0) * 1000);
-            },
-            onStateChange: (event) => {
-              onDuration((event.target.getDuration() ?? 0) * 1000);
-              if (!isHost || applyingRef.current) return;
-              const positionMs = event.target.getCurrentTime() * 1000;
-              if (event.data === YT.PlayerState.PLAYING) onHostAction("play", positionMs);
-              if (event.data === YT.PlayerState.PAUSED) onHostAction("pause", positionMs);
-            },
-            onError: (event) => {
-              if (event.data === 101 || event.data === 150) {
-                onError(new ApiError("YOUTUBE_NOT_EMBEDDABLE", "YouTube won’t embed this video.").message);
-              } else {
-                onError("This YouTube video couldn’t be played.");
-              }
-            },
-          },
-        });
-      })
-      .catch(() => onError("Could not load the YouTube player."));
-    return () => {
-      cancelled = true;
-      playerRef.current?.destroy();
-      playerRef.current = null;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playback.mediaUrl]);
-
-  useEffect(() => {
-    applyYoutube(playerRef.current, playback, applyingRef, lastAppliedRef);
-  }, [applyingRef, lastAppliedRef, playback, playerRef]);
-
-  useEffect(() => {
-    const id = window.setInterval(() => {
-      const player = playerRef.current;
-      if (!player) return;
-      const local = player.getCurrentTime() * 1000;
-      onPosition(local);
-      onDuration((player.getDuration() ?? 0) * 1000);
-      if (isHost) return;
-      const expected = estimatedPosition(playback);
-      if (Math.abs(local - expected) > DRIFT_CORRECTION_MS) {
-        applyingRef.current = true;
-        player.seekTo(expected / 1000, true);
-        window.setTimeout(() => {
-          applyingRef.current = false;
-        }, 250);
-      }
-    }, 700);
-    return () => window.clearInterval(id);
-  }, [applyingRef, isHost, onDuration, onPosition, playback, playerRef]);
-
-  return <div ref={mountRef} className="absolute inset-0 h-full w-full" />;
-}
-
-function Html5Stage({
-  playback,
-  isHost,
-  applyingRef,
-  lastAppliedRef,
-  videoRef,
-  onHostAction,
-  onDuration,
-  onPosition,
-  onError,
-}: {
-  playback: PlaybackState;
-  isHost: boolean;
-  applyingRef: MutableRefObject<boolean>;
-  lastAppliedRef: MutableRefObject<string>;
-  videoRef: MutableRefObject<HTMLVideoElement | null>;
-  onHostAction: (action: "play" | "pause" | "seek" | "rate", positionMs: number, rate?: number) => void;
-  onDuration: (ms: number) => void;
-  onPosition: (ms: number) => void;
-  onError: (message: string | null) => void;
-}) {
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video || !playback.mediaUrl) return;
-    const el = video;
-    const src = playback.mediaUrl;
-    let hls: { destroy(): void } | null = null;
-    let cancelled = false;
-    async function attach() {
-      onError(null);
-      if (isHlsUrl(src) && !el.canPlayType("application/vnd.apple.mpegurl")) {
-        const Hls = (await import("hls.js")).default;
-        if (cancelled) return;
-        if (Hls.isSupported()) {
-          const instance = new Hls();
-          instance.loadSource(src);
-          instance.attachMedia(el);
-          hls = instance;
-          return;
-        }
-      }
-      el.src = src;
-    }
-    void attach();
-    lastAppliedRef.current = "";
-    return () => {
-      cancelled = true;
-      hls?.destroy();
-    };
-  }, [lastAppliedRef, onError, playback.mediaUrl, videoRef]);
-
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    applyHtml5(video, playback, applyingRef, lastAppliedRef);
-  }, [applyingRef, lastAppliedRef, playback, videoRef]);
-
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    const id = window.setInterval(() => {
-      const local = video.currentTime * 1000;
-      onPosition(local);
-      if (video.duration && Number.isFinite(video.duration)) onDuration(video.duration * 1000);
-      if (isHost) return;
-      const expected = estimatedPosition(playback);
-      if (Math.abs(local - expected) > DRIFT_CORRECTION_MS) {
-        applyingRef.current = true;
-        video.currentTime = expected / 1000;
-        window.setTimeout(() => {
-          applyingRef.current = false;
-        }, 250);
-      }
-    }, 700);
-    return () => window.clearInterval(id);
-  }, [applyingRef, isHost, onDuration, onPosition, playback, videoRef]);
-
-  return (
-    <video
-      ref={videoRef}
-      className="absolute inset-0 h-full w-full bg-black object-contain"
-      playsInline
-      controls={false}
-      onPlay={() => {
-        if (!isHost || applyingRef.current || !videoRef.current) return;
-        onHostAction("play", videoRef.current.currentTime * 1000);
-      }}
-      onPause={() => {
-        if (!isHost || applyingRef.current || !videoRef.current) return;
-        onHostAction("pause", videoRef.current.currentTime * 1000);
-      }}
-      onLoadedMetadata={() => {
-        if (videoRef.current?.duration) onDuration(videoRef.current.duration * 1000);
-      }}
-      onError={() => onError("This video couldn’t be loaded. Check the URL or try another allowed link.")}
-    />
-  );
-}
-
-function applyYoutube(
-  player: YTPlayer | null,
-  playback: PlaybackState,
-  applyingRef: MutableRefObject<boolean>,
-  lastAppliedRef: MutableRefObject<string>,
-) {
-  if (!player) return;
-  const key = signature(playback);
-  if (lastAppliedRef.current === key) return;
-  lastAppliedRef.current = key;
-  applyingRef.current = true;
-  player.setPlaybackRate(playback.playbackRate);
-  player.seekTo(estimatedPosition(playback) / 1000, true);
-  if (playback.status === "playing") player.playVideo();
-  else player.pauseVideo();
-  window.setTimeout(() => {
-    applyingRef.current = false;
-  }, 280);
-}
-
-function applyHtml5(
-  video: HTMLVideoElement,
-  playback: PlaybackState,
-  applyingRef: MutableRefObject<boolean>,
-  lastAppliedRef: MutableRefObject<string>,
-) {
-  const key = signature(playback);
-  if (lastAppliedRef.current === key) return;
-  lastAppliedRef.current = key;
-  applyingRef.current = true;
-  video.playbackRate = playback.playbackRate;
-  video.currentTime = estimatedPosition(playback) / 1000;
-  const play = playback.status === "playing" ? video.play() : Promise.resolve(video.pause());
-  void Promise.resolve(play).finally(() => {
-    window.setTimeout(() => {
-      applyingRef.current = false;
-    }, 280);
-  });
-}
+export default SyncedPlayer;

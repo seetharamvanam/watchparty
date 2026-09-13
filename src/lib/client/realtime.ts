@@ -1,57 +1,10 @@
 import { isMockApi } from "@/lib/client/config";
 import { subscribeMockEvents } from "@/lib/client/mock-bus";
 import type { RealtimeTokenResponse, WatchPartyApi } from "@/lib/client/api-types";
-import type { ChatMessagePublic, ParticipantPublic, PlaybackState, RoomPublic } from "@/lib/types";
+import type { RealtimeConnection, RoomEvent } from "@/lib/client/room-events";
 
-export type RoomEvent = {
-  type: string;
-  room?: RoomPublic;
-  participants?: ParticipantPublic[];
-  playback?: PlaybackState;
-  participant?: ParticipantPublic;
-  participantId?: string;
-  participantCount?: number;
-  host?: ParticipantPublic;
-  message?: ChatMessagePublic;
-  emoji?: string;
-  displayName?: string;
-  createdAt?: string;
-  status?: PlaybackState["status"];
-  positionMs?: number;
-  playbackRate?: number;
-  mediaUrl?: string | null;
-  mediaType?: PlaybackState["mediaType"];
-  updatedAt?: string;
-  serverNow?: string;
-  driftCorrectionMs?: number;
-};
-
-/** Subscribe-only. Clients never publish; the API server publishes with ABLY_API_KEY. */
-export interface RealtimeConnection {
-  subscribe(handler: (event: RoomEvent) => void): () => void;
-  close(): void;
-}
-
-export function playbackFromEvent(event: RoomEvent, fallback: PlaybackState): PlaybackState {
-  if (event.playback) return event.playback;
-  if (
-    event.type === "play" ||
-    event.type === "pause" ||
-    event.type === "seek" ||
-    event.type === "rate" ||
-    event.type === "change_media"
-  ) {
-    return {
-      status: (event.status as PlaybackState["status"]) ?? fallback.status,
-      positionMs: event.positionMs ?? fallback.positionMs,
-      playbackRate: event.playbackRate ?? fallback.playbackRate,
-      mediaUrl: event.mediaUrl !== undefined ? event.mediaUrl : fallback.mediaUrl,
-      mediaType: event.mediaType !== undefined ? event.mediaType : fallback.mediaType,
-      updatedAt: event.updatedAt ?? fallback.updatedAt,
-    };
-  }
-  return fallback;
-}
+export type { RealtimeConnection, RoomEvent } from "@/lib/client/room-events";
+export { isStalePlaybackEvent, playbackFromEvent } from "@/lib/client/room-events";
 
 function connectMock(roomCode: string): RealtimeConnection {
   const code = roomCode.toUpperCase();

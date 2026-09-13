@@ -13,13 +13,14 @@ import {
 import { getApi } from "@/lib/client";
 import { ApiError, isApiError } from "@/lib/client/errors";
 import { isMockApi, PRESENCE_INTERVAL_MS } from "@/lib/client/config";
+import type { ReactionPublic } from "@/lib/client/api-types";
 import {
-  connectRealtime,
+  isStalePlaybackEvent,
   playbackFromEvent,
   type RealtimeConnection,
   type RoomEvent,
-} from "@/lib/client/realtime";
-import type { ReactionPublic } from "@/lib/client/api-types";
+} from "@/lib/client/room-events";
+import { loadChatAfterReady, loadRoomReady } from "@/lib/client/room-ready";
 import { clearSession, readSession, writeSession } from "@/lib/client/session";
 import type {
   ChatMessagePublic,
@@ -29,7 +30,8 @@ import type {
 } from "@/lib/types";
 import type { PlaybackRequest, ReactionEmoji } from "@/lib/client/api-types";
 
-export type RoomPhase = "boot" | "needs-join" | "ready" | "error";
+/** Visible room load machine: skeleton (`boot`) → `syncing` → `ready`. */
+export type RoomPhase = "boot" | "needs-join" | "syncing" | "ready" | "error";
 export type ConnectionState = "connecting" | "connected" | "lost";
 
 const idlePlayback: PlaybackState = {
@@ -81,6 +83,7 @@ export function RoomProvider({ code, children }: { code: string; children: React
   const [reactions, setReactions] = useState<ReactionPublic[]>([]);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const realtimeRef = useRef<RealtimeConnection | null>(null);
+  const enterGenRef = useRef(0);
   const playbackRef = useRef(playback);
   playbackRef.current = playback;
 
@@ -96,7 +99,10 @@ export function RoomProvider({ code, children }: { code: string; children: React
       case "seek":
       case "rate":
       case "change_media":
-        setPlayback((current) => playbackFromEvent(event, current));
+        setPlayback((current) => {
+          if (isStalePlaybackEvent(event, current)) return current;
+          return playbackFromEvent(event, current);
+        });
         break;
       case "participant_joined":
         if (event.participant) {
@@ -151,29 +157,78 @@ export function RoomProvider({ code, children }: { code: string; children: React
     }
   }, []);
 
+  const failEnter = useCallback(
+    (err: unknown) => {
+      if (isApiError(err) && err.code === "UNAUTHORIZED") {
+        clearSession(code);
+        setPhase("needs-join");
+        setError(null);
+        return;
+      }
+      if (isApiError(err) && err.code === "ROOM_NOT_FOUND") {
+        clearSession(code);
+        setError(err);
+        setPhase("error");
+        return;
+      }
+      setError(isApiError(err) ? err : new ApiError("UNKNOWN", "Could not open this room."));
+      setPhase("error");
+    },
+    [code],
+  );
+
   const enter = useCallback(
     async (token: string, participant: ParticipantPublic) => {
+      const gen = ++enterGenRef.current;
+      setPhase("syncing");
       setSessionToken(token);
       setMe(participant);
-      const snap = await api.getRoom(code, token);
-      setRoom(snap.room);
-      setPlayback(snap.playback);
-      setParticipants(snap.participants);
-      if (snap.participant) setMe(snap.participant);
-      const { messages } = await api.listChat(code, token);
-      setChat(messages);
-      setPhase("ready");
+      setConnection("connecting");
       setError(null);
-      try {
-        setConnection("connecting");
-        realtimeRef.current?.close();
-        const connection = await connectRealtime(api, code, token);
-        realtimeRef.current = connection;
-        connection.subscribe(handleEvent);
-        setConnection("connected");
-      } catch {
-        setConnection("lost");
+
+      const buffered: RoomEvent[] = [];
+      let releaseBuffer: (() => void) | undefined;
+
+      const { snapshot, realtime, realtimeFailed } = await loadRoomReady({
+        getSnapshot: () => api.getRoom(code, token),
+        connectRealtime: async () => {
+          const { connectRealtime } = await import("@/lib/client/realtime");
+          const connection = await connectRealtime(api, code, token);
+          releaseBuffer = connection.subscribe((event) => {
+            buffered.push(event);
+          });
+          return connection;
+        },
+      });
+
+      if (gen !== enterGenRef.current) {
+        realtime?.close();
+        return;
       }
+
+      setRoom(snapshot.room);
+      setPlayback(snapshot.playback);
+      setParticipants(snapshot.participants);
+      if (snapshot.participant) setMe(snapshot.participant);
+
+      realtimeRef.current?.close();
+      if (realtime) {
+        releaseBuffer?.();
+        realtimeRef.current = realtime;
+        realtime.subscribe(handleEvent);
+        for (const event of buffered) handleEvent(event);
+        setConnection("connected");
+      } else {
+        realtimeRef.current = null;
+        setConnection(realtimeFailed ? "lost" : "connecting");
+      }
+
+      setPhase("ready");
+
+      void loadChatAfterReady(() => api.listChat(code, token)).then((messages) => {
+        if (gen !== enterGenRef.current || !messages.length) return;
+        setChat(messages);
+      });
     },
     [api, code, handleEvent],
   );
@@ -185,21 +240,14 @@ export function RoomProvider({ code, children }: { code: string; children: React
     const timer = window.setTimeout(() => {
       enter(session.sessionToken, session.participant).catch((err) => {
         if (cancelled) return;
-        if (isApiError(err) && (err.code === "UNAUTHORIZED" || err.code === "ROOM_NOT_FOUND")) {
-          clearSession(code);
-          setPhase(err.code === "ROOM_NOT_FOUND" ? "error" : "needs-join");
-          setError(err.code === "ROOM_NOT_FOUND" ? err : null);
-          return;
-        }
-        setError(isApiError(err) ? err : new ApiError("UNKNOWN", "Could not open this room."));
-        setPhase("error");
+        failEnter(err);
       });
     }, 0);
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [code, enter]);
+  }, [code, enter, failEnter]);
 
   useEffect(() => {
     if (phase !== "ready" || !sessionToken) return;
@@ -221,12 +269,18 @@ export function RoomProvider({ code, children }: { code: string; children: React
         participant: session.participant,
         displayName: session.participant.displayName,
       });
-      await enter(session.sessionToken, session.participant);
+      try {
+        await enter(session.sessionToken, session.participant);
+      } catch (err) {
+        failEnter(err);
+        throw err;
+      }
     },
-    [api, code, enter],
+    [api, code, enter, failEnter],
   );
 
   const leave = useCallback(async () => {
+    enterGenRef.current += 1;
     if (sessionToken) {
       try {
         await api.leave(code, sessionToken);
@@ -236,6 +290,7 @@ export function RoomProvider({ code, children }: { code: string; children: React
     }
     clearSession(code);
     realtimeRef.current?.close();
+    realtimeRef.current = null;
   }, [api, code, sessionToken]);
 
   const sendChat = useCallback(

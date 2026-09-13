@@ -6,11 +6,10 @@ import { getApi } from "@/lib/client";
 import { avatarColorFor, initialsFor } from "@/lib/client/avatar";
 import { cn } from "@/lib/client/cn";
 import { isMockApi } from "@/lib/client/config";
-import { connectLiveKit, type AvSession, type RemoteFace } from "@/lib/client/livekit";
+import type { AttachableTrack, AvSession, RemoteFace } from "@/lib/client/av-types";
 import { useMediaDevices } from "@/lib/client/use-media-devices";
 import { useRoom } from "@/lib/client/room-context";
 import type { ParticipantPublic } from "@/lib/types";
-import type { RemoteTrack } from "livekit-client";
 
 export function FaceStrip() {
   const { participants, me, sessionToken, code } = useRoom();
@@ -42,6 +41,7 @@ export function FaceStrip() {
           if (!cancelled) setAvUnavailable(true);
           return;
         }
+        const { connectLiveKit } = await import("@/lib/client/livekit");
         const session = await connectLiveKit(creds);
         await session.connect();
         if (cancelled) {
@@ -235,6 +235,8 @@ export function FaceStrip() {
   );
 }
 
+export default FaceStrip;
+
 function ToggleChip({
   pressed,
   onClick,
@@ -336,7 +338,7 @@ function FaceTile({
   );
 }
 
-function RemoteMedia({ track, kind }: { track: RemoteTrack; kind: "video" | "audio" }) {
+function RemoteMedia({ track, kind }: { track: AttachableTrack; kind: "video" | "audio" }) {
   const ref = useRef<HTMLVideoElement | HTMLAudioElement | null>(null);
 
   useEffect(() => {
