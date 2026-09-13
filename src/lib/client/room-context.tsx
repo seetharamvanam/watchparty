@@ -92,7 +92,12 @@ export function RoomProvider({ code, children }: { code: string; children: React
       case "state_snapshot":
         if (event.room) setRoom(event.room);
         if (event.participants) setParticipants(event.participants);
-        if (event.playback) setPlayback(event.playback);
+        if (event.playback) {
+          setPlayback((current) => {
+            if (isStalePlaybackEvent(event, current)) return current;
+            return event.playback!;
+          });
+        }
         break;
       case "play":
       case "pause":
@@ -269,6 +274,12 @@ export function RoomProvider({ code, children }: { code: string; children: React
         participant: session.participant,
         displayName: session.participant.displayName,
       });
+      // Apply the join snapshot immediately so mid-playback late joiners do not
+      // sit on idle position 0 while GET room + Ably subscribe race in enter().
+      setRoom(session.room);
+      setPlayback(session.playback);
+      setParticipants(session.participants);
+      setMe(session.participant);
       try {
         await enter(session.sessionToken, session.participant);
       } catch (err) {

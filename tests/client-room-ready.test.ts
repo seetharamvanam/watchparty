@@ -107,4 +107,47 @@ describe("playback event freshness", () => {
     expect(isStalePlaybackEvent(fresh, current)).toBe(false);
     expect(playbackFromEvent(fresh, current).positionMs).toBe(8000);
   });
+
+  it("treats older or equal eventId and clock-less spoof events as stale", () => {
+    const current = { ...playback("2026-09-13T12:00:05.000Z", 5000), eventId: "1773331205000" };
+    expect(
+      isStalePlaybackEvent(
+        {
+          type: "state_snapshot",
+          eventId: "1773331200000",
+          playback: { ...current, eventId: "1773331200000", updatedAt: "2026-09-13T12:00:00.000Z" },
+        },
+        current,
+      ),
+    ).toBe(true);
+    expect(
+      isStalePlaybackEvent(
+        { type: "play", eventId: "1773331205000", updatedAt: current.updatedAt, positionMs: 1 },
+        current,
+      ),
+    ).toBe(true);
+    expect(
+      isStalePlaybackEvent(
+        { type: "seek", eventId: "1773331209000", updatedAt: "2026-09-13T12:00:09.000Z", positionMs: 9000 },
+        current,
+      ),
+    ).toBe(false);
+    expect(isStalePlaybackEvent({ type: "play", positionMs: 0 }, current)).toBe(true);
+  });
+
+  it("does not keep a snapshot estimatedPositionMs on incremental play/seek events", () => {
+    const current = {
+      ...playback("2026-09-13T12:00:05.000Z", 5000),
+      estimatedPositionMs: 5000,
+      serverNow: "2026-09-13T12:00:05.000Z",
+      eventId: "1",
+    };
+    const next = playbackFromEvent(
+      { type: "seek", positionMs: 9000, updatedAt: "2026-09-13T12:00:09.000Z", eventId: "2" },
+      current,
+    );
+    expect(next.positionMs).toBe(9000);
+    expect(next.estimatedPositionMs).toBeUndefined();
+    expect(next.eventId).toBe("2");
+  });
 });

@@ -57,13 +57,22 @@ Tokens are hashed at rest with `SESSION_SECRET`. They are not user accounts.
   "playbackRate": 1,
   "mediaUrl": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
   "mediaType": "youtube",
-  "updatedAt": "2026-09-13T12:00:00.000Z"
+  "updatedAt": "2026-09-13T12:00:00.000Z",
+  "serverNow": "2026-09-13T12:00:00.000Z",
+  "estimatedPositionMs": 0,
+  "eventId": "1773331200000"
 }
 ```
 
 - `status`: `playing` | `paused`
 - `mediaType`: `youtube` | `direct` | `null`
-- `updatedAt` is the last host mutation. Clients should compute expected position while playing as `positionMs + (now - updatedAt) * playbackRate` and **correct drift greater than 500ms**.
+- `positionMs` + `updatedAt` are the last **host mutation** (the sync anchor). The server does not rewrite this pair on read.
+- `serverNow` is the server clock when this payload was produced.
+- `estimatedPositionMs` is the live position as of `serverNow`: while `status=playing`, `positionMs + (serverNow - updatedAt) * playbackRate`; while paused, it equals `positionMs`. Late joiners should apply this (or `GET /playback`) so they do not start at 0.
+- `eventId` is the last host mutation id (`updatedAt` millis). Clients **must ignore** playback events whose `eventId` / `updatedAt` is older than or equal to the snapshot already applied.
+- Guests correct when `|local - expected| > 500` (`SYNC_DRIFT_MS`). Expected position:
+  - HTTP / `state_snapshot`: `estimatedPositionMs + (now - serverNow) * playbackRate` while playing
+  - `play` / `pause` / `seek` / `rate`: `positionMs + (now - updatedAt) * playbackRate` while playing
 
 ### Error envelope
 
@@ -217,9 +226,15 @@ Response `200`: `{ "playback": {} }`
 
 Publishes the matching Ably event (`play` / `pause` / `seek` / `rate` / `change_media`).
 
+**Host only.** Guests — and any leftover session after host transfer — receive `FORBIDDEN` (or `UNAUTHORIZED` if the session already left). Mutations lock the room row so leave + transfer cannot overlap a command; at most one participant is host after the transaction commits.
+
 ### `GET /api/rooms/:code/playback`
 
+Authoritative late-join / resync snapshot. Same `playback` shape as above, including a **fresh** `estimatedPositionMs` and `serverNow` so a guest who joins mid-playback can seek before or alongside the Ably subscribe.
+
 Response `200`: `{ "playback": {} }`
+
+`GET /api/rooms/:code` and `POST /api/rooms/join` return the same live `playback` object. Prefer those existing endpoints; this GET is the playback-only form.
 
 ### `POST /api/realtime/token`
 
@@ -304,7 +319,7 @@ Response: `{ "room", "participant", "expiresAt" }`.
 
 `POST /api/rooms/:code/leave` — session required.
 
-Marks the caller as left. If they were host, the **oldest active** participant (earliest `joinedAt`) becomes host and Ably emits `host_changed`.
+Marks the caller as left. If they were host, the **oldest active** participant (earliest `joinedAt`) becomes host. The leave transaction locks the room row, clears every `isHost` bit, then promotes exactly one successor so two hosts cannot command. Ably emits `host_changed` and a fresh `state_snapshot`. The previous host’s session is revoked (`leftAt` set); further playback POSTs are `UNAUTHORIZED`.
 
 Response:
 
@@ -320,22 +335,18 @@ Response:
 
 Clients subscribe (and may use presence/history) with the token from `POST /api/realtime/token`. They **must not** and **cannot** publish. The API server publishes all of the following events with the Ably REST API key:
 
-| Event | When |
-| --- | --- |
-| `play` | Host started playback |
-| `pause` | Host paused |
-| `seek` | Host seeked |
-| `rate` | Host changed rate |
-| `change_media` | Host changed media URL |
-| `state_snapshot` | Room created / participant joined (full room + playback + roster) |
-| `participant_joined` | Someone joined |
-| `participant_left` | Someone left |
-| `host_changed` | Host transferred |
-| `room_expired` | Reserved for expiry notices |
-| `chat_message` | Persisted chat |
-| `reaction` | Ephemeral reaction |
+| Event | When | Payload |
+| --- | --- | --- |
+| `play` / `pause` / `seek` / `rate` / `change_media` | Host mutation via `POST /playback` (or `/media`) | Incremental: last-mutation `positionMs` + `updatedAt` + `eventId`. Apply only if newer than the current clock. |
+| `state_snapshot` | Room created, participant joined, host transferred | Full `room` + `participants` + live `playback` (`estimatedPositionMs`, `serverNow`, `eventId`). Use for late join / resync. Ignore **playback** on this event if `eventId`/`updatedAt` is stale; still apply roster/room. |
+| `participant_joined` | Someone joined | Roster delta |
+| `participant_left` | Someone left | Roster delta |
+| `host_changed` | Host transferred | New host. Followed by `state_snapshot`. |
+| `room_expired` | Reserved for expiry notices | |
+| `chat_message` | Persisted chat | |
+| `reaction` | Ephemeral reaction | |
 
-Playback events include `positionMs`, `playbackRate`, `updatedAt`, `serverNow`, and `driftCorrectionMs: 500`. Clients must resync when local drift exceeds 500ms.
+Playback events include `positionMs`, `playbackRate`, `updatedAt`, `eventId`, `serverNow`, and `driftCorrectionMs: 500` (`SYNC_DRIFT_MS`). Clients must resync when local drift exceeds 500ms. Drop events that are older than the HTTP snapshot already applied, and drop events that omit `eventId`/`updatedAt` (treat as client-originated spoof — Ably tokens cannot publish anyway).
 
 ## LiveKit
 

@@ -7,9 +7,10 @@ export type RoomReadyResult<TConnection> = {
 };
 
 /**
- * Fast room-ready path: HTTP snapshot (room + playback + roster) in parallel
- * with the realtime subscribe. Chat is not part of this — load it after ready
- * so playback TTI is not blocked.
+ * Fast room-ready path: GET room (authoritative snapshot: room + playback +
+ * media + roster) in parallel with the Ably subscribe. Apply the HTTP snapshot
+ * first, then drain buffered events so late joiners never start from 0 / stale
+ * realtime. Chat is loaded after ready so playback TTI is not blocked.
  */
 export async function loadRoomReady<TConnection extends { close: () => void }>(options: {
   getSnapshot: () => Promise<RoomView>;

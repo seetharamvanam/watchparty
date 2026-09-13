@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
-import { getDb } from "@/db";
+import { getDb, type AppDb } from "@/db";
 import { chatMessages, participants, playbackStates, rooms, type ParticipantRow, type PlaybackRow, type RoomRow } from "@/db/schema";
 import { ablyPlaybackEvent, createAblyTokenRequest, publishRoomEvent } from "./ably";
 import { generateRoomCode, isRoomCodeFormat, normalizeRoomCode } from "./codes";
@@ -87,6 +87,8 @@ type RoomContext = {
   playback: PlaybackRow;
   active: ParticipantRow[];
 };
+
+type DbTx = Parameters<Parameters<AppDb["transaction"]>[0]>[0];
 
 function nowPlusTtl(from = new Date()): Date {
   return new Date(from.getTime() + ROOM_TTL_MS);
@@ -180,6 +182,64 @@ function requireHost(participant: ParticipantRow) {
   }
 }
 
+function roomStateSnapshot(ctx: RoomContext, now = new Date()) {
+  return {
+    type: "state_snapshot" as const,
+    room: serializeRoom(ctx.room, ctx.active.length),
+    participants: ctx.active.map(serializeParticipant),
+    playback: serializePlayback(ctx.playback, now),
+    serverNow: now.toISOString(),
+  };
+}
+
+/**
+ * Serialize host playback/media writes against the room row so leave+transfer
+ * cannot overlap a mutation (at most one host can command).
+ */
+async function mutateAsHost<T>(
+  req: Request,
+  code: string,
+  fn: (ctx: { tx: DbTx; room: RoomRow; participant: ParticipantRow; playback: PlaybackRow }) => Promise<T>,
+): Promise<T> {
+  const token = readBearerToken(req);
+  if (!token) {
+    throw unauthorized();
+  }
+  const normalized = normalizeRoomCode(code);
+  if (!isRoomCodeFormat(normalized)) {
+    throw roomNotFound();
+  }
+
+  const db = getDb();
+  return db.transaction(async (tx) => {
+    const [room] = await tx.select().from(rooms).where(eq(rooms.code, normalized)).for("update");
+    if (!room) {
+      throw roomNotFound();
+    }
+    assertNotExpired(room);
+
+    const [participant] = await tx
+      .select()
+      .from(participants)
+      .where(eq(participants.sessionTokenHash, hashSessionToken(token)))
+      .limit(1);
+    if (!participant || participant.leftAt) {
+      throw unauthorized();
+    }
+    if (participant.roomId !== room.id) {
+      throw forbidden("Session does not belong to this room");
+    }
+    requireHost(participant);
+
+    const [playback] = await tx.select().from(playbackStates).where(eq(playbackStates.roomId, room.id)).limit(1);
+    if (!playback) {
+      throw roomNotFound("Playback state missing for room");
+    }
+
+    return fn({ tx, room, participant, playback });
+  });
+}
+
 async function touchPresence(roomId: string, participantId?: string) {
   const db = getDb();
   const now = new Date();
@@ -266,7 +326,7 @@ export async function createRoom(input: unknown): Promise<SessionPayload> {
       mediaUrl,
       mediaType,
       updatedAt: now,
-    }),
+    }, now),
     serverNow: now.toISOString(),
   });
 
@@ -333,13 +393,7 @@ export async function joinRoom(input: unknown): Promise<JoinPayload> {
     participant: serializeParticipant(participant),
     participantCount: ctx.active.length,
   });
-  await publishRoomEvent(joined.code, "state_snapshot", {
-    type: "state_snapshot",
-    room: serializeRoom(ctx.room, ctx.active.length),
-    participants: publicParticipants,
-    playback: serializePlayback(ctx.playback),
-    serverNow: new Date().toISOString(),
-  });
+  await publishRoomEvent(joined.code, "state_snapshot", roomStateSnapshot(ctx));
 
   return {
     room: serializeRoom(ctx.room, ctx.active.length),
@@ -369,10 +423,10 @@ export async function getRoomView(req: Request, code: string): Promise<RoomView>
 }
 
 async function updatePlayback(
+  db: AppDb | DbTx,
   roomId: string,
   patch: Partial<PlaybackRow> & { updatedAt: Date },
 ): Promise<PlaybackRow> {
-  const db = getDb();
   const [row] = await db.update(playbackStates).set(patch).where(eq(playbackStates.roomId, roomId)).returning();
   if (!row) {
     throw roomNotFound("Playback state missing for room");
@@ -382,17 +436,18 @@ async function updatePlayback(
 
 export async function setRoomMedia(req: Request, code: string, input: unknown) {
   const body = mediaSchema.parse(input);
-  const { participant, room } = await requireSession(req, code);
-  requireHost(participant);
   const validated = validateMediaUrl(body.mediaUrl);
   const now = new Date();
 
-  const playback = await updatePlayback(room.id, {
-    mediaUrl: validated.mediaUrl,
-    mediaType: validated.mediaType,
-    status: "paused",
-    positionMs: 0,
-    updatedAt: now,
+  const { room, participant, playback } = await mutateAsHost(req, code, async ({ tx, room, participant }) => {
+    const playback = await updatePlayback(tx, room.id, {
+      mediaUrl: validated.mediaUrl,
+      mediaType: validated.mediaType,
+      status: "paused",
+      positionMs: 0,
+      updatedAt: now,
+    });
+    return { room, participant, playback };
   });
 
   await publishRoomEvent(room.code, "change_media", ablyPlaybackEvent("change_media", playback, participant.id));
@@ -401,56 +456,52 @@ export async function setRoomMedia(req: Request, code: string, input: unknown) {
 
 export async function controlPlayback(req: Request, code: string, input: unknown) {
   const body = playbackSchema.parse(input);
-  const { participant, room } = await requireSession(req, code);
-  requireHost(participant);
-
-  const db = getDb();
-  const [current] = await db.select().from(playbackStates).where(eq(playbackStates.roomId, room.id)).limit(1);
-  if (!current) {
-    throw roomNotFound("Playback state missing for room");
-  }
-
-  const now = new Date();
   const action = body.action as PlaybackAction;
-  const patch: Partial<PlaybackRow> & { updatedAt: Date } = { updatedAt: now };
 
-  switch (action) {
-    case "play":
-      patch.status = "playing";
-      patch.positionMs = body.positionMs ?? current.positionMs;
-      break;
-    case "pause":
-      patch.status = "paused";
-      patch.positionMs = body.positionMs ?? current.positionMs;
-      break;
-    case "seek":
-      if (body.positionMs === undefined) {
-        throw validationError("positionMs is required for seek");
+  const { room, participant, playback } = await mutateAsHost(req, code, async ({ tx, room, participant, playback: current }) => {
+    const now = new Date();
+    const patch: Partial<PlaybackRow> & { updatedAt: Date } = { updatedAt: now };
+
+    switch (action) {
+      case "play":
+        patch.status = "playing";
+        patch.positionMs = body.positionMs ?? current.positionMs;
+        break;
+      case "pause":
+        patch.status = "paused";
+        patch.positionMs = body.positionMs ?? current.positionMs;
+        break;
+      case "seek":
+        if (body.positionMs === undefined) {
+          throw validationError("positionMs is required for seek");
+        }
+        patch.positionMs = body.positionMs;
+        break;
+      case "rate":
+        if (body.playbackRate === undefined) {
+          throw validationError("playbackRate is required for rate");
+        }
+        patch.playbackRate = body.playbackRate;
+        break;
+      case "change_media": {
+        if (!body.mediaUrl) {
+          throw validationError("mediaUrl is required for change_media");
+        }
+        const validated = validateMediaUrl(body.mediaUrl);
+        patch.mediaUrl = validated.mediaUrl;
+        patch.mediaType = validated.mediaType;
+        patch.status = "paused";
+        patch.positionMs = body.positionMs ?? 0;
+        break;
       }
-      patch.positionMs = body.positionMs;
-      break;
-    case "rate":
-      if (body.playbackRate === undefined) {
-        throw validationError("playbackRate is required for rate");
-      }
-      patch.playbackRate = body.playbackRate;
-      break;
-    case "change_media": {
-      if (!body.mediaUrl) {
-        throw validationError("mediaUrl is required for change_media");
-      }
-      const validated = validateMediaUrl(body.mediaUrl);
-      patch.mediaUrl = validated.mediaUrl;
-      patch.mediaType = validated.mediaType;
-      patch.status = "paused";
-      patch.positionMs = body.positionMs ?? 0;
-      break;
+      default:
+        throw validationError("Unsupported playback action");
     }
-    default:
-      throw validationError("Unsupported playback action");
-  }
 
-  const playback = await updatePlayback(room.id, patch);
+    const playback = await updatePlayback(tx, room.id, patch);
+    return { room, participant, playback };
+  });
+
   const eventName = action === "change_media" ? "change_media" : action;
   await publishRoomEvent(room.code, eventName, ablyPlaybackEvent(eventName, playback, participant.id));
 
@@ -556,18 +607,50 @@ export async function heartbeat(req: Request, code: string) {
 }
 
 export async function leaveRoom(req: Request, code: string) {
-  const { participant, room } = await requireSession(req, code);
+  const token = readBearerToken(req);
+  if (!token) {
+    throw unauthorized();
+  }
+  const normalized = normalizeRoomCode(code);
+  if (!isRoomCodeFormat(normalized)) {
+    throw roomNotFound();
+  }
+
   const db = getDb();
   const now = new Date();
+  let left: ParticipantRow | null = null;
   let newHost: ParticipantRow | null = null;
+  let roomCode = normalized;
 
   await db.transaction(async (tx) => {
+    const [room] = await tx.select().from(rooms).where(eq(rooms.code, normalized)).for("update");
+    if (!room) {
+      throw roomNotFound();
+    }
+    assertNotExpired(room);
+    roomCode = room.code;
+
+    const [participant] = await tx
+      .select()
+      .from(participants)
+      .where(eq(participants.sessionTokenHash, hashSessionToken(token)))
+      .for("update");
+    if (!participant || participant.leftAt) {
+      throw unauthorized();
+    }
+    if (participant.roomId !== room.id) {
+      throw forbidden("Session does not belong to this room");
+    }
+    left = participant;
+
     await tx
       .update(participants)
       .set({ leftAt: now, isHost: false, lastSeenAt: now })
       .where(eq(participants.id, participant.id));
 
     if (participant.isHost) {
+      // Drop every host bit first so two participants can never both command.
+      await tx.update(participants).set({ isHost: false }).where(eq(participants.roomId, room.id));
       const [nextHost] = await tx
         .select()
         .from(participants)
@@ -581,17 +664,23 @@ export async function leaveRoom(req: Request, code: string) {
     }
   });
 
-  await publishRoomEvent(room.code, "participant_left", {
+  if (!left) {
+    throw unauthorized();
+  }
+
+  await publishRoomEvent(roomCode, "participant_left", {
     type: "participant_left",
-    participantId: participant.id,
-    displayName: participant.displayName,
+    participantId: left.id,
+    displayName: left.displayName,
   });
 
   if (newHost) {
-    await publishRoomEvent(room.code, "host_changed", {
+    await publishRoomEvent(roomCode, "host_changed", {
       type: "host_changed",
       host: serializeParticipant(newHost),
     });
+    const ctx = await loadContext(roomCode);
+    await publishRoomEvent(roomCode, "state_snapshot", roomStateSnapshot(ctx));
   }
 
   return {

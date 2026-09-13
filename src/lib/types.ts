@@ -24,6 +24,12 @@ export type PlaybackState = {
   mediaUrl: string | null;
   mediaType: MediaType;
   updatedAt: string;
+  /** Server clock when this payload was produced. */
+  serverNow?: string;
+  /** Live position as of `serverNow` while playing; equals `positionMs` when paused. */
+  estimatedPositionMs?: number;
+  /** Monotonic id of the last host mutation (`updatedAt` millis). Used to drop stale events. */
+  eventId?: string;
 };
 
 export type ChatMessagePublic = {

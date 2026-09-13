@@ -76,6 +76,28 @@ describe("host authorization", () => {
     expect((await media.json()).error.code).toBe("FORBIDDEN");
   });
 
+  it("forbids guest seek, pause, play, and rate with FORBIDDEN", async () => {
+    const { body: created } = await createHost({
+      mediaUrl: "https://cdn.example.com/movie.mp4",
+    });
+    const { body: guest } = await joinGuest(created.room.code, "Guest");
+    const code = created.room.code;
+
+    for (const body of [
+      { action: "seek", positionMs: 8_000 },
+      { action: "pause", positionMs: 8_000 },
+      { action: "play", positionMs: 8_000 },
+      { action: "rate", playbackRate: 1.25 },
+    ]) {
+      const res = await setPlayback(
+        jsonRequest(`http://localhost/api/rooms/${code}/playback`, "POST", body, guest.sessionToken),
+        params(code),
+      );
+      expect(res.status, body.action).toBe(403);
+      expect((await res.json()).error.code).toBe("FORBIDDEN");
+    }
+  });
+
   it("allows the host to change media and playback", async () => {
     const { body: created } = await createHost();
     const code = created.room.code;

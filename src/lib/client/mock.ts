@@ -1,7 +1,8 @@
 import { emitMockEvent } from "@/lib/client/mock-bus";
 import type { ReactionEmoji, WatchPartyApi } from "@/lib/client/api-types";
 import { ApiError, toApiError } from "@/lib/client/errors";
-import { ROOM_CODE_ALPHABET, ROOM_CODE_LENGTH, ROOM_TTL_MS, MAX_PARTICIPANTS } from "@/lib/constants";
+import { ROOM_CODE_ALPHABET, ROOM_CODE_LENGTH, ROOM_TTL_MS, MAX_PARTICIPANTS, SYNC_DRIFT_MS } from "@/lib/constants";
+import { estimatedPositionMs, playbackEventId } from "@/lib/sync-rules";
 import { isRoomCodeFormat, normalizeRoomCode } from "@/lib/client/room-code";
 import { validateMediaUrl } from "@/lib/media";
 import type {
@@ -31,15 +32,26 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-function emptyPlayback(): PlaybackState {
+function livePlayback(playback: PlaybackState): PlaybackState {
+  const now = new Date();
   return {
+    ...playback,
+    serverNow: now.toISOString(),
+    estimatedPositionMs: estimatedPositionMs(playback, now.getTime()),
+    eventId: playback.eventId ?? playbackEventId(playback.updatedAt),
+  };
+}
+
+function emptyPlayback(): PlaybackState {
+  const updatedAt = nowIso();
+  return livePlayback({
     status: "paused",
     positionMs: 0,
     playbackRate: 1,
     mediaUrl: null,
     mediaType: null,
-    updatedAt: nowIso(),
-  };
+    updatedAt,
+  });
 }
 
 function loadDb(): MockDb {
@@ -97,14 +109,14 @@ function auth(record: MockRoom, token?: string): ParticipantPublic {
 function applyMedia(url: string): PlaybackState {
   try {
     const parsed = validateMediaUrl(url);
-    return {
+    return livePlayback({
       status: "paused",
       positionMs: 0,
       playbackRate: 1,
       mediaUrl: parsed.mediaUrl,
       mediaType: parsed.mediaType,
       updatedAt: nowIso(),
-    };
+    });
   } catch (error) {
     throw toApiError(error);
   }
@@ -149,7 +161,7 @@ export function createMockApi(): WatchPartyApi {
         participants: [participant],
         playback,
       });
-      return { room, participant, sessionToken: token, playback };
+      return { room, participant, sessionToken: token, playback: livePlayback(playback) };
     },
 
     async joinRoom(input) {
@@ -182,13 +194,13 @@ export function createMockApi(): WatchPartyApi {
         roomCode: code,
         room: record.room,
         participants: record.participants,
-        playback: record.playback,
+        playback: livePlayback(record.playback),
       });
       return {
         room: record.room,
         participant,
         sessionToken: token,
-        playback: record.playback,
+        playback: livePlayback(record.playback),
         participants: [...record.participants],
       };
     },
@@ -203,7 +215,7 @@ export function createMockApi(): WatchPartyApi {
       return {
         room: record.room,
         participants: [...record.participants],
-        playback: { ...record.playback },
+        playback: livePlayback(record.playback),
         participant,
       };
     },
@@ -220,10 +232,11 @@ export function createMockApi(): WatchPartyApi {
         roomCode: record.room.code,
         ...record.playback,
         actorParticipantId: actor.id,
-        driftCorrectionMs: 500,
+        eventId: record.playback.eventId ?? playbackEventId(record.playback.updatedAt),
+        driftCorrectionMs: SYNC_DRIFT_MS,
         serverNow: nowIso(),
       });
-      return { room: record.room, playback: { ...record.playback } };
+      return { room: record.room, playback: livePlayback(record.playback) };
     },
 
     async controlPlayback(code, body, token) {
@@ -248,25 +261,26 @@ export function createMockApi(): WatchPartyApi {
           next.playbackRate = body.playbackRate;
         }
         if (typeof body.positionMs === "number" && body.action !== "seek") next.positionMs = body.positionMs;
-        record.playback = next;
+        record.playback = livePlayback(next);
       }
       saveDb(db);
       emitMockEvent({
         type: body.action,
         roomCode: record.room.code,
         ...record.playback,
-        driftCorrectionMs: 500,
+        eventId: record.playback.eventId ?? playbackEventId(record.playback.updatedAt),
+        driftCorrectionMs: SYNC_DRIFT_MS,
         serverNow: nowIso(),
         actorParticipantId: actor.id,
       });
-      return { playback: { ...record.playback } };
+      return { playback: livePlayback(record.playback) };
     },
 
     async getPlayback(code, token) {
       const db = loadDb();
       const record = getRoom(db, normalizeRoomCode(code));
       auth(record, token);
-      return { playback: { ...record.playback } };
+      return { playback: livePlayback(record.playback) };
     },
 
     async getRealtimeToken(code, token) {

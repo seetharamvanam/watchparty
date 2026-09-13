@@ -2,6 +2,9 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { GET as getRoom } from "@/app/api/rooms/[code]/route";
 import { POST as setPlayback } from "@/app/api/rooms/[code]/playback/route";
 import { POST as leave } from "@/app/api/rooms/[code]/leave/route";
+import { getDb } from "@/db";
+import { participants } from "@/db/schema";
+import { and, eq, isNull } from "drizzle-orm";
 import { getPublishedEvents } from "@/lib/ably";
 import { createHost, joinGuest, jsonRequest, params, resetTestState } from "./helpers";
 
@@ -67,5 +70,84 @@ describe("host transfer", () => {
       params(code),
     );
     expect(asSecond.status).toBe(403);
+  });
+
+  it("never leaves two active hosts after transfer, even if leave races playback", async () => {
+    const { body: created } = await createHost({
+      displayName: "Host",
+      mediaUrl: "https://cdn.example.com/movie.mp4",
+    });
+    const code = created.room.code as string;
+    const first = await joinGuest(code, "First");
+    const second = await joinGuest(code, "Second");
+
+    const raced = await Promise.all([
+      leave(
+        jsonRequest(`http://localhost/api/rooms/${code}/leave`, "POST", {}, created.sessionToken),
+        params(code),
+      ),
+      setPlayback(
+        jsonRequest(
+          `http://localhost/api/rooms/${code}/playback`,
+          "POST",
+          { action: "seek", positionMs: 9_000 },
+          created.sessionToken,
+        ),
+        params(code),
+      ),
+    ]);
+
+    const leaveRes = raced[0];
+    const playRes = raced[1];
+    expect(leaveRes.status).toBe(200);
+    expect([200, 401, 403]).toContain(playRes.status);
+    if (playRes.status !== 200) {
+      const playBody = await playRes.json();
+      expect(["UNAUTHORIZED", "FORBIDDEN"]).toContain(playBody.error.code);
+    }
+
+    const active = await getDb()
+      .select()
+      .from(participants)
+      .where(and(eq(participants.roomId, created.room.id), isNull(participants.leftAt)));
+    expect(active.filter((row) => row.isHost)).toHaveLength(1);
+    expect(active.find((row) => row.isHost)?.id).toBe(first.body.participant.id);
+
+    const events = getPublishedEvents();
+    expect(events.some((event) => event.name === "host_changed")).toBe(true);
+    expect(events.some((event) => event.name === "state_snapshot")).toBe(true);
+
+    const asOld = await setPlayback(
+      jsonRequest(
+        `http://localhost/api/rooms/${code}/playback`,
+        "POST",
+        { action: "pause" },
+        created.sessionToken,
+      ),
+      params(code),
+    );
+    expect(asOld.status).toBe(401);
+
+    const asNew = await setPlayback(
+      jsonRequest(
+        `http://localhost/api/rooms/${code}/playback`,
+        "POST",
+        { action: "pause", positionMs: 1_000 },
+        first.body.sessionToken,
+      ),
+      params(code),
+    );
+    expect(asNew.status).toBe(200);
+
+    const asGuest = await setPlayback(
+      jsonRequest(
+        `http://localhost/api/rooms/${code}/playback`,
+        "POST",
+        { action: "seek", positionMs: 50 },
+        second.body.sessionToken,
+      ),
+      params(code),
+    );
+    expect(asGuest.status).toBe(403);
   });
 });
